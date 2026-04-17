@@ -1,7 +1,20 @@
+import json
+import os
 import socket
 import time
 
-ROBOT_IP = "192.168.5.3"
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+
+def _load_robot_ip():
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            return json.load(f).get("robot_ip", "192.168.5.1")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[AYAR] settings.json okunamadı, varsayılan IP kullanılacak: {e}")
+        return "192.168.5.1"
+
+ROBOT_IP = _load_robot_ip()
+print(f"[AYAR] Robot IP: {ROBOT_IP}")
 
 def send_command(sock, cmd):
     sock.send(f"{cmd}\n".encode())
