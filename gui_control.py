@@ -9,12 +9,17 @@ import re
 import time
 import threading
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "TCP-IP-Python-V4"))
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QGroupBox, QGridLayout,
-    QSlider, QProgressBar, QFrame
+    QSlider, QProgressBar, QFrame, QDialog, QScrollArea, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -31,6 +36,173 @@ from joystick_control import (
     BTN_CROSS, BTN_CIRCLE, BTN_TRIANGLE, BTN_SQUARE,
     BTN_L1, BTN_R1, BTN_SHARE, BTN_OPTIONS, BTN_PS, BTN_L3,
 )
+
+
+class JoystickTestDialog(QDialog):
+    """Robot bağlantısı olmadan joystick eksen ve buton değerlerini canlı gösterir."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Joystick Test — Tuş ve Eksen Görüntüleyici")
+        self.setMinimumSize(520, 480)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e2e; }
+            QLabel  { color: #cdd6f4; font-size: 12px; }
+            QGroupBox {
+                color: #89b4fa; border: 1px solid #45475a;
+                border-radius: 6px; margin-top: 8px; padding-top: 10px;
+                font-weight: bold;
+            }
+            QGroupBox::title { subcontrol-position: top left; padding: 2px 8px; }
+            QProgressBar {
+                background-color: #313244; border-radius: 4px; height: 14px;
+                text-align: center; color: #cdd6f4; font-size: 10px;
+            }
+            QProgressBar::chunk { background-color: #89b4fa; border-radius: 4px; }
+        """)
+
+        self.js = None
+        self.axis_bars   = []
+        self.axis_labels = []
+        self.btn_labels  = []
+
+        layout = QVBoxLayout(self)
+
+        # Joystick seç / durum
+        self.lbl_js_name = QLabel("Joystick aranıyor...")
+        self.lbl_js_name.setFont(QFont("Arial", 13, QFont.Bold))
+        self.lbl_js_name.setStyleSheet("color: #f9e2af; padding: 4px;")
+        layout.addWidget(self.lbl_js_name)
+
+        # Eksenler grubu
+        self.axes_group = QGroupBox("Eksenler")
+        self.axes_layout = QGridLayout(self.axes_group)
+        layout.addWidget(self.axes_group)
+
+        # Butonlar grubu
+        self.btns_group = QGroupBox("Butonlar")
+        self.btns_layout = QGridLayout(self.btns_group)
+        layout.addWidget(self.btns_group)
+
+        btn_close = QPushButton("Kapat")
+        btn_close.setStyleSheet(
+            "QPushButton { background-color: #45475a; color: #cdd6f4; "
+            "border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #585b70; }"
+        )
+        btn_close.clicked.connect(self.close)
+        layout.addWidget(btn_close, alignment=Qt.AlignRight)
+
+        pygame.init()
+        pygame.joystick.init()
+        self._build_ui()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update)
+        self.timer.start(50)
+
+    def _build_ui(self):
+        # Önceki widget'ları temizle
+        for i in reversed(range(self.axes_layout.count())):
+            self.axes_layout.itemAt(i).widget().deleteLater()
+        for i in reversed(range(self.btns_layout.count())):
+            self.btns_layout.itemAt(i).widget().deleteLater()
+        self.axis_bars.clear()
+        self.axis_labels.clear()
+        self.btn_labels.clear()
+
+        if pygame.joystick.get_count() == 0:
+            self.lbl_js_name.setText("Joystick bulunamadı - bağlayıp tekrar dene")
+            self.lbl_js_name.setStyleSheet("color: #f38ba8; padding: 4px;")
+            self.js = None
+            return
+
+        self.js = pygame.joystick.Joystick(0)
+        self.js.init()
+        self.lbl_js_name.setText(f"Bağlı: {self.js.get_name()}")
+        self.lbl_js_name.setStyleSheet("color: #a6e3a1; font-weight: bold; padding: 4px;")
+
+        # Eksen satırları
+        for i in range(self.js.get_numaxes()):
+            lbl_name = QLabel(f"Eksen {i}")
+            lbl_name.setFixedWidth(70)
+
+            bar = QProgressBar()
+            bar.setRange(-100, 100)
+            bar.setValue(0)
+            bar.setFormat("%v")
+
+            lbl_val = QLabel("0.00")
+            lbl_val.setFixedWidth(50)
+            lbl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lbl_val.setStyleSheet("color: #89dceb;")
+
+            self.axes_layout.addWidget(lbl_name, i, 0)
+            self.axes_layout.addWidget(bar,      i, 1)
+            self.axes_layout.addWidget(lbl_val,  i, 2)
+            self.axis_bars.append(bar)
+            self.axis_labels.append(lbl_val)
+
+        # Buton grid'i (5 sütun)
+        cols = 5
+        for i in range(self.js.get_numbuttons()):
+            lbl = QLabel(f"B{i}")
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setFixedSize(54, 28)
+            lbl.setFont(QFont("Arial", 10, QFont.Bold))
+            lbl.setStyleSheet(
+                "background-color: #313244; color: #6c7086; "
+                "border-radius: 6px; border: 1px solid #45475a;"
+            )
+            self.btns_layout.addWidget(lbl, i // cols, i % cols)
+            self.btn_labels.append(lbl)
+
+    def _update(self):
+        pygame.event.pump()
+
+        if self.js is None:
+            # Joystick takılmış mı tekrar kontrol et
+            pygame.joystick.quit()
+            pygame.joystick.init()
+            if pygame.joystick.get_count() > 0:
+                self._build_ui()
+            return
+
+        # Eksenler
+        for i, (bar, lbl_val) in enumerate(zip(self.axis_bars, self.axis_labels)):
+            val = self.js.get_axis(i)
+            bar.setValue(int(val * 100))
+            lbl_val.setText(f"{val:+.2f}")
+            if abs(val) > 0.1:
+                bar.setStyleSheet(
+                    "QProgressBar::chunk { background-color: #a6e3a1; border-radius: 4px; }"
+                )
+            else:
+                bar.setStyleSheet(
+                    "QProgressBar::chunk { background-color: #89b4fa; border-radius: 4px; }"
+                )
+
+        # Butonlar
+        for i, lbl in enumerate(self.btn_labels):
+            pressed = self.js.get_button(i)
+            if pressed:
+                lbl.setStyleSheet(
+                    "background-color: #a6e3a1; color: #1e1e2e; "
+                    "border-radius: 6px; border: 1px solid #a6e3a1; font-weight: bold;"
+                )
+                lbl.setText(f"B{i} ●")
+            else:
+                lbl.setStyleSheet(
+                    "background-color: #313244; color: #6c7086; "
+                    "border-radius: 6px; border: 1px solid #45475a;"
+                )
+                lbl.setText(f"B{i}")
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        if self.js:
+            self.js.quit()
+        event.accept()
 
 
 class SignalBridge(QObject):
@@ -58,7 +230,7 @@ class RobotGUI(QMainWindow):
         self.status_timer.start(500)
 
     def _init_ui(self):
-        self.setWindowTitle("Dobot Nova 5 - Diş Sağlığı Robot Kontrol")
+        self.setWindowTitle("Dobot Nova 5 — Diş Hekimliği Robot Kontrolü")
         self.setMinimumSize(900, 650)
         self.setStyleSheet("""
             QMainWindow { background-color: #1e1e2e; }
@@ -111,9 +283,9 @@ class RobotGUI(QMainWindow):
 
         status_grid.addWidget(QLabel("Bağlantı:"), 0, 0)
         status_grid.addWidget(self.lbl_connection, 0, 1)
-        status_grid.addWidget(QLabel("Robot Mode:"), 1, 0)
+        status_grid.addWidget(QLabel("Robot Modu:"), 1, 0)
         status_grid.addWidget(self.lbl_robot_mode, 1, 1)
-        status_grid.addWidget(QLabel("Hatalar:"), 2, 0)
+        status_grid.addWidget(QLabel("Hata Durumu:"), 2, 0)
         status_grid.addWidget(self.lbl_errors, 2, 1)
 
         top_row.addWidget(status_group)
@@ -160,7 +332,7 @@ class RobotGUI(QMainWindow):
         top_row.addWidget(speed_group)
 
         # Tool mesafesi
-        tool_group = QGroupBox("Tool Mesafesi")
+        tool_group = QGroupBox("Tool Mesafesi (TCP)")
         tool_layout = QVBoxLayout(tool_group)
 
         self.lbl_tool_dist = QLabel(f"{self.controller.tool_distance}mm")
@@ -194,7 +366,7 @@ class RobotGUI(QMainWindow):
         pos_group = QGroupBox("Pozisyon Kontrol")
         pos_layout = QHBoxLayout(pos_group)
 
-        self.btn_home = QPushButton("◄ HOME GİT")
+        self.btn_home = QPushButton("HOME'A GİT")
         self.btn_home.setStyleSheet("""
             QPushButton { background-color: #1e66f5; color: white; font-size: 14px; padding: 10px; }
             QPushButton:hover { background-color: #2a7bff; }
@@ -203,14 +375,14 @@ class RobotGUI(QMainWindow):
             lambda: self.controller.go_to_position(self.controller.home_joints, "HOME")
         ))
 
-        self.btn_save_home = QPushButton("HOME\nKAYDET")
+        self.btn_save_home = QPushButton("HOME\nPOZ. KAYDET")
         self.btn_save_home.setStyleSheet("""
             QPushButton { background-color: #04a5e5; color: white; font-size: 11px; padding: 8px; }
             QPushButton:hover { background-color: #22bbff; }
         """)
         self.btn_save_home.clicked.connect(lambda: self._run_async(self.controller.save_home))
 
-        self.btn_surgery = QPushButton("AMELİYAT GİT ►")
+        self.btn_surgery = QPushButton("AMELİYATA GİT")
         self.btn_surgery.setStyleSheet("""
             QPushButton { background-color: #e64553; color: white; font-size: 14px; padding: 10px; }
             QPushButton:hover { background-color: #ff5566; }
@@ -219,28 +391,28 @@ class RobotGUI(QMainWindow):
             lambda: self.controller.go_to_position(self.controller.surgery_joints, "AMELİYAT")
         ))
 
-        self.btn_save_surgery = QPushButton("AMELİYAT\nKAYDET")
+        self.btn_save_surgery = QPushButton("AMELİYAT\nPOZ. KAYDET")
         self.btn_save_surgery.setStyleSheet("""
             QPushButton { background-color: #df8e1d; color: white; font-size: 11px; padding: 8px; }
             QPushButton:hover { background-color: #ffaa22; }
         """)
         self.btn_save_surgery.clicked.connect(lambda: self._run_async(self.controller.save_surgery))
 
-        self.btn_enable = QPushButton("ENABLE")
+        self.btn_enable = QPushButton("ROBOTU\nETKİNLEŞTİR")
         self.btn_enable.setStyleSheet("""
             QPushButton { background-color: #40a02b; color: white; font-size: 14px; padding: 12px; }
             QPushButton:hover { background-color: #50c030; }
         """)
         self.btn_enable.clicked.connect(lambda: self._run_async(self.controller.enable_robot))
 
-        self.btn_stop = QPushButton("DURDUR")
+        self.btn_stop = QPushButton("HAREKETİ\nDURDUR")
         self.btn_stop.setStyleSheet("""
             QPushButton { background-color: #fe640b; color: white; font-size: 14px; padding: 12px; }
             QPushButton:hover { background-color: #ff7722; }
         """)
         self.btn_stop.clicked.connect(self.controller._force_stop)
 
-        self.btn_emergency = QPushButton("ACİL STOP")
+        self.btn_emergency = QPushButton("ACİL DURDUR\n(DISABLE)")
         self.btn_emergency.setStyleSheet("""
             QPushButton { background-color: #d20f39; color: white; font-size: 14px;
                           padding: 12px; border: 2px solid #ff0000; }
@@ -259,24 +431,26 @@ class RobotGUI(QMainWindow):
         main_layout.addWidget(pos_group)
 
         # === JOYSTICK HARİTASI ===
-        map_group = QGroupBox("Joystick Haritası")
+        map_group = QGroupBox("Joystick Haritası (Hangi Tuş Ne Yapar)")
         map_layout = QHBoxLayout(map_group)
 
         eklem_text = (
             "EKLEM MODU\n"
-            "Sol Analog Y → J1 taban\n"
-            "Sol Analog X → J2 omuz\n"
-            "Sağ Analog Y → J3 dirsek\n"
-            "Sağ Analog X → J4 bilek\n"
-            "L2/R2 → J5 | D-Pad Y → J6"
+            "Sol Analog Y → J1 (taban)\n"
+            "Sol Analog X → J2 (omuz)\n"
+            "Sağ Analog Y → J3 (dirsek)\n"
+            "Sağ Analog X → J4 (bilek)\n"
+            "L2 / R2        → J5\n"
+            "D-Pad ▲▼      → J6"
         )
         tool_text = (
             "TOOL MODU\n"
-            "Sol Analog Y → X ileri/geri\n"
-            "Sol Analog X → Y sol/sağ\n"
-            "Sağ Analog Y → Z yukarı/aşağı\n"
-            "Sağ Analog X → Rz dönüş\n"
-            "L2/R2 → Rx | D-Pad Y → Ry"
+            "Sol Analog Y → X (ileri/geri)\n"
+            "Sol Analog X → Y (sol/sağ)\n"
+            "Sağ Analog Y → Z (yukarı/aşağı)\n"
+            "Sağ Analog X → Ry (kafa sola/sağa)\n"
+            "L2 / R2        → Rx (kafa yukarı/aşağı)\n"
+            "D-Pad ▲▼      → Rz (kafa yatırma)"
         )
 
         lbl_eklem = QLabel(eklem_text)
@@ -289,11 +463,15 @@ class RobotGUI(QMainWindow):
 
         lbl_btns = QLabel(
             "BUTONLAR\n"
-            "SHARE → Mod değiştir\n"
-            "△/X → Hız +/-\n"
-            "□ → Durdur\n"
-            "R1 → Enable | L1 → Disable\n"
-            "D-Pad ◄/► → Home/Ameliyat"
+            "□  Acil durdur (Disable)\n"
+            "△  Hız artır    ×  Hız azalt\n"
+            "○  Sürükleme (drag) modu\n"
+            "SHARE  Eklem ↔ Tool modu\n"
+            "L1  Robotu kapat   R1  Robotu aç\n"
+            "L3  Home kaydet    R3  Ameliyat kaydet\n"
+            "OPTIONS  Hareketi durdur\n"
+            "D-Pad ◄  HOME'a git\n"
+            "D-Pad ►  AMELİYAT'a git"
         )
         lbl_btns.setFont(QFont("monospace", 10))
         lbl_btns.setStyleSheet("color: #89b4fa; padding: 8px;")
@@ -307,7 +485,7 @@ class RobotGUI(QMainWindow):
         main_layout.addWidget(map_group)
 
         # === LOG ===
-        log_group = QGroupBox("Log")
+        log_group = QGroupBox("Sistem Log'u")
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -315,23 +493,31 @@ class RobotGUI(QMainWindow):
         log_layout.addWidget(self.log_text)
         main_layout.addWidget(log_group)
 
-        # === ALT BAR: Başlat/Durdur ===
+        # === ALT BAR: Başlat/Durdur/Test ===
         bottom = QHBoxLayout()
-        self.btn_start = QPushButton("JOYSTICK BAŞLAT")
+        self.btn_start = QPushButton("JOYSTICK KONTROLÜNÜ BAŞLAT")
         self.btn_start.setStyleSheet("""
             QPushButton { background-color: #40a02b; color: white; font-size: 15px; padding: 10px; }
             QPushButton:hover { background-color: #50c030; }
         """)
         self.btn_start.clicked.connect(self._start_worker)
 
-        self.btn_quit = QPushButton("KAPAT")
+        self.btn_quit = QPushButton("UYGULAMAYI KAPAT")
         self.btn_quit.setStyleSheet("""
             QPushButton { background-color: #6c7086; color: white; font-size: 15px; padding: 10px; }
         """)
         self.btn_quit.clicked.connect(self.close)
 
+        self.btn_js_test = QPushButton("JOYSTICK TEST")
+        self.btn_js_test.setStyleSheet("""
+            QPushButton { background-color: #7287fd; color: white; font-size: 13px; padding: 10px; }
+            QPushButton:hover { background-color: #8899ff; }
+        """)
+        self.btn_js_test.clicked.connect(self._open_joystick_test)
+
         bottom.addWidget(self.btn_start, stretch=3)
         bottom.addWidget(self.btn_quit, stretch=1)
+        bottom.addWidget(self.btn_js_test, stretch=1)
         main_layout.addLayout(bottom)
 
     def _status_label(self, text, color="#cdd6f4"):
@@ -357,12 +543,30 @@ class RobotGUI(QMainWindow):
         builtins.print = gui_print
 
     def _append_log(self, text):
-        # Durum sinyali kontrolü
         if text.startswith("__STATE__:"):
             state = text.split(":")[1]
             self._set_start_btn_state(state)
             return
-        self.log_text.append(text)
+
+        # Anahtar kelimelere göre renkli HTML log
+        import html
+        safe = html.escape(text)
+        if "[OK]" in text or "bağlandı" in text.lower() or "hazır" in text.lower():
+            html_line = f'<span style="color:#a6e3a1;">{safe}</span>'
+        elif "[HATA]" in text or "hata" in text.lower() or "error" in text.lower():
+            html_line = f'<span style="color:#f38ba8;font-weight:bold;">{safe}</span>'
+        elif "[UYARI]" in text or "uyarı" in text.lower():
+            html_line = f'<span style="color:#f9e2af;">{safe}</span>'
+        elif "joystick" in text.lower():
+            html_line = f'<span style="color:#89dceb;font-weight:bold;">{safe}</span>'
+        elif "enable" in text.lower() or "etkin" in text.lower():
+            html_line = f'<span style="color:#a6e3a1;font-weight:bold;">{safe}</span>'
+        elif "stop" in text.lower() or "durdur" in text.lower() or "acil" in text.lower():
+            html_line = f'<span style="color:#fab387;font-weight:bold;">{safe}</span>'
+        else:
+            html_line = f'<span style="color:#a6adc8;">{safe}</span>'
+
+        self.log_text.append(html_line)
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum()
         )
@@ -401,10 +605,10 @@ class RobotGUI(QMainWindow):
 
         # Aktif jog
         if c.active_jog:
-            self.lbl_active_jog.setText(f"Hareket: {c.active_jog}")
+            self.lbl_active_jog.setText(f"Aktif hareket: {c.active_jog}")
             self.lbl_active_jog.setStyleSheet("color: #f9e2af; font-size: 14px;")
         else:
-            self.lbl_active_jog.setText("Beklemede")
+            self.lbl_active_jog.setText("Hareketsiz")
             self.lbl_active_jog.setStyleSheet("color: #6c7086; font-size: 14px;")
 
         # Hız
@@ -418,24 +622,24 @@ class RobotGUI(QMainWindow):
 
         # Hata
         if c.error_state:
-            self.lbl_errors.setText("HATA!")
+            self.lbl_errors.setText("Hata var")
             self.lbl_errors.setStyleSheet("color: #f38ba8; font-weight: bold;")
         else:
-            self.lbl_errors.setText("Yok")
+            self.lbl_errors.setText("Sorun yok")
             self.lbl_errors.setStyleSheet("color: #a6e3a1; font-weight: bold;")
 
     def _set_start_btn_state(self, state):
         """Başlat butonunun durumunu ayarla: 'ready', 'running', 'no_joystick', 'no_robot'"""
         styles = {
-            "ready": ("JOYSTICK BAŞLAT", True,
+            "ready": ("JOYSTICK KONTROLÜNÜ BAŞLAT", True,
                 "QPushButton { background-color: #40a02b; color: white; font-size: 15px; padding: 10px; }"
                 "QPushButton:hover { background-color: #50c030; }"),
-            "running": ("ÇALIŞIYOR", False,
+            "running": ("KONTROL AKTİF", False,
                 "QPushButton { background-color: #1e66f5; color: white; font-size: 15px; padding: 10px; }"),
-            "no_joystick": ("JOYSTICK BULUNAMADI - TEKRAR DENE", True,
+            "no_joystick": ("JOYSTICK BULUNAMADI — TEKRAR DENE", True,
                 "QPushButton { background-color: #d20f39; color: white; font-size: 15px; padding: 10px; }"
                 "QPushButton:hover { background-color: #ff1144; }"),
-            "no_robot": ("ROBOT BAĞLANTI HATASI - TEKRAR DENE", True,
+            "no_robot": ("ROBOT'A BAĞLANILAMADI — TEKRAR DENE", True,
                 "QPushButton { background-color: #d20f39; color: white; font-size: 15px; padding: 10px; }"
                 "QPushButton:hover { background-color: #ff1144; }"),
         }
@@ -465,7 +669,8 @@ class RobotGUI(QMainWindow):
 
         js = pygame.joystick.Joystick(0)
         js.init()
-        print(f"[OK] Joystick: {js.get_name()}")
+        print(f"[OK] Joystick bağlandı: {js.get_name()} "
+              f"({js.get_numaxes()} eksen, {js.get_numbuttons()} buton)")
 
         if not self.controller.connect():
             self.worker_running = False
@@ -499,6 +704,10 @@ class RobotGUI(QMainWindow):
             self.worker_running = False
             self.signals.log.emit("__STATE__:ready")
             print("[OK] Joystick durduruldu")
+
+    def _open_joystick_test(self):
+        dlg = JoystickTestDialog(self)
+        dlg.exec_()
 
     def closeEvent(self, event):
         self.controller.running = False

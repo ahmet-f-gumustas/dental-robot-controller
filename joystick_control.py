@@ -31,7 +31,15 @@ Kontrol Şeması:
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "TCP-IP-Python-V4"))
+
+# PyInstaller bundle veya normal Python çalışmasında doğru klasörü bul
+def _app_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+_BASE_DIR = _app_dir()
+sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
 
 import pygame
 from dobot_api import DobotApiDashboard
@@ -44,8 +52,8 @@ import time
 
 import json as _json
 
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
-POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+SETTINGS_FILE = os.path.join(_BASE_DIR, "settings.json")
+POSITIONS_FILE = os.path.join(_BASE_DIR, "positions.json")
 
 # Varsayılan ayarlar
 _DEFAULTS = {
@@ -109,28 +117,67 @@ MIN_SWITCH_TIME = _S["min_switch_time"]
 HOME_JOINTS = None
 SURGERY_JOINTS = None
 
-# PS5 DualSense buton indeksleri (pygame - Linux)
-BTN_CROSS = 0
-BTN_CIRCLE = 1
-BTN_TRIANGLE = 2
-BTN_SQUARE = 3
-BTN_L1 = 4
-BTN_R1 = 5
-BTN_L2 = 6
-BTN_R2 = 7
-BTN_SHARE = 8
-BTN_OPTIONS = 9
-BTN_PS = 10
-BTN_L3 = 11
-BTN_R3 = 12
+# PS5 DualSense buton ve axis indeksleri - Windows / Linux farklı
+import platform as _platform
+if _platform.system() == "Windows":
+    # Windows (pygame 2.6 + DualSense - 17 buton)
+    # --- DOĞRULANMIŞ test sonuçları ---
+    BTN_CROSS      = 0    # ✓ Hız azalt
+    BTN_CIRCLE     = 1    # ✓ Drag modu
+    BTN_SQUARE     = 2    # ✓ ACİL STOP
+    BTN_TRIANGLE   = 3    # ✓ Hız artır
+    BTN_SHARE      = 4    # ✓ Mod değiştir (Linux SHARE: toggle_mode)
+    BTN_PS         = 5    # ✓ (atanmamış - kullanıcı isteği)
+    BTN_OPTIONS    = 6    # ✓ Durdur (force_stop)
+    BTN_L3         = 7    # ✓ Home KAYDET (Linux L3)
+    BTN_R3         = 8    # ✓ Ameliyat KAYDET (Linux R3)
+    BTN_L1         = 9    # ✓ Disable robot (Linux L1)
+    BTN_R1         = 10   # ✓ Enable robot (Linux R1)
+    BTN_DPAD_UP    = 11   # ✓ D-Pad Yukarı → J6+ (eklem) / Rz+ (tool)
+    BTN_DPAD_DOWN  = 12   # ✓ D-Pad Aşağı  → J6- (eklem) / Rz- (tool)
+    BTN_HOME_GO    = 13   # ✓ D-Pad Sol → HOME'a git
+    BTN_SURGERY_GO = 14   # ✓ D-Pad Sağ → Ameliyat'a git
+    # B15: Touchpad       (atanmamış)
+    # B16: Mikrofon       Windows OS yakalıyor, event gelmez
+    BTN_L2      = -91     # axis 4, buton olarak yok
+    BTN_R2      = -92     # axis 5, buton olarak yok
+else:
+    # Linux SDL2
+    BTN_CROSS      = 0
+    BTN_CIRCLE     = 1
+    BTN_TRIANGLE   = 2
+    BTN_SQUARE     = 3
+    BTN_L1         = 4
+    BTN_R1         = 5
+    BTN_L2         = 6
+    BTN_R2         = 7
+    BTN_SHARE      = 8
+    BTN_OPTIONS    = 9
+    BTN_PS         = 10
+    BTN_L3         = 11
+    BTN_R3         = 12
+    BTN_HOME_GO    = -1  # Linux'ta D-Pad (hat) kullanılır
+    BTN_SURGERY_GO = -1
+    BTN_DPAD_UP    = -1  # Linux'ta hat[1] kullanılır
+    BTN_DPAD_DOWN  = -1
 
-# Axis indeksleri (DualSense - Linux SDL2)
-AXIS_LX = 0
-AXIS_LY = 1
-AXIS_L2 = 2
-AXIS_RX = 3
-AXIS_RY = 4
-AXIS_R2 = 5
+# Axis indeksleri - Windows ve Linux farklı mapping kullanır
+if _platform.system() == "Windows":
+    # Windows: pygame DualSense axis sırası
+    AXIS_LX = 0
+    AXIS_LY = 1
+    AXIS_RX = 2
+    AXIS_RY = 3
+    AXIS_L2 = 4
+    AXIS_R2 = 5
+else:
+    # Linux SDL2
+    AXIS_LX = 0
+    AXIS_LY = 1
+    AXIS_L2 = 2
+    AXIS_RX = 3
+    AXIS_RY = 4
+    AXIS_R2 = 5
 
 # Modlar
 MODE_JOINT = "EKLEM"
@@ -159,7 +206,7 @@ class JoystickRobotController:
         self._load_positions()
 
     def _load_positions(self):
-        """Kayıtlı pozisyonları ve tool mesafesini dosyadan yükle"""
+        """Kayıtlı pozisyonları, tool mesafesini ve hızı dosyadan yükle"""
         import json
         if os.path.exists(POSITIONS_FILE):
             try:
@@ -168,24 +215,32 @@ class JoystickRobotController:
                 self.home_joints = data.get("home")
                 self.surgery_joints = data.get("surgery")
                 self.tool_distance = data.get("tool_distance", DEFAULT_TOOL_DISTANCE)
+                saved_speed = data.get("speed")
+                if saved_speed is not None:
+                    self.speed = max(SPEED_MIN, min(SPEED_MAX, int(saved_speed)))
                 if self.home_joints:
                     print(f"[POZ] Home yüklendi: {self.home_joints}")
                 if self.surgery_joints:
                     print(f"[POZ] Ameliyat yüklendi: {self.surgery_joints}")
                 print(f"[POZ] Tool mesafesi: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+                print(f"[POZ] Hız: %{self.speed}")
             except Exception as e:
                 print(f"[POZ] Dosya okunamadı: {e}")
 
     def _save_positions(self):
-        """Pozisyonları ve tool mesafesini dosyaya kaydet"""
+        """Pozisyonları, tool mesafesini ve hızı dosyaya kaydet"""
         import json
         data = {
             "home": self.home_joints,
             "surgery": self.surgery_joints,
-            "tool_distance": self.tool_distance
+            "tool_distance": self.tool_distance,
+            "speed": self.speed,
         }
-        with open(POSITIONS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(POSITIONS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"[POZ] Dosya yazılamadı: {e}")
 
     def _read_current_joints(self):
         """Mevcut eklem açılarını oku, liste olarak döndür"""
@@ -309,6 +364,24 @@ class JoystickRobotController:
         self._apply_tool()
         time.sleep(0.3)
 
+        # Mod 5 (Idle/hazır) olana kadar bekle — en fazla 3 deneme
+        ready = False
+        for attempt in range(3):
+            for _ in range(10):  # 5 saniye bekle (10 x 0.5)
+                mode_resp = str(self._safe_cmd(self.dashboard.RobotMode))
+                if ",{5}," in mode_resp:
+                    ready = True
+                    break
+                time.sleep(0.5)
+            if ready:
+                break
+            # Hâlâ Mode 5 değil → ClearError + EnableRobot tekrar
+            print(f"[HAZIRLIK] Mod 5'e geçmedi (deneme {attempt+1}), hata temizleniyor...")
+            self._safe_cmd(self.dashboard.ClearError)
+            time.sleep(0.5)
+            self._safe_cmd(self.dashboard.EnableRobot)
+            time.sleep(1)
+
         mode = self._safe_cmd(self.dashboard.RobotMode)
         errors = self._safe_cmd(self.dashboard.GetErrorID)
         print(f"[HAZIRLIK] Mode: {mode} | Errors: {errors}")
@@ -316,7 +389,11 @@ class JoystickRobotController:
         self.error_state = False
         self.active_jog = ""
         print(f"[HAZIRLIK] Hız: %{self.speed} | Tool: {TOOL_INDEX}")
-        print("[HAZIRLIK] Robot hazır!")
+        if ready:
+            print("[HAZIRLIK] Robot hazır! (Mode 5 = Idle)")
+        else:
+            print("[UYARI] Robot Mode 5'e geçmedi. Fiziksel acil durdur butonuna veya"
+                  " tablet kontrolde hata varsa temizle; bu mesajdan sonra tekrar dene.")
 
     def recover_from_error(self):
         print("[KURTARMA] Hata tespit edildi, kurtarılıyor...")
@@ -413,9 +490,16 @@ class JoystickRobotController:
             self._safe_cmd(self.dashboard.AccJ, JOG_ACC_JOINT)
 
     def set_speed(self, speed):
-        self.speed = max(SPEED_MIN, min(SPEED_MAX, speed))
-        resp = self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
-        print(f"[HIZ] %{self.speed}  ({resp})")
+        new_speed = max(SPEED_MIN, min(SPEED_MAX, speed))
+        if new_speed == self.speed:
+            return
+        self.speed = new_speed
+        if self.dashboard:
+            resp = self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
+            print(f"[HIZ] %{self.speed}  ({resp})")
+        else:
+            print(f"[HIZ] %{self.speed}")
+        self._save_positions()
 
     def print_current_position(self):
         """Mevcut pozisyonu terminale yazdır (kopyala-yapıştır için)"""
@@ -650,38 +734,77 @@ class JoystickRobotController:
             print("[OK] Program sonlandırıldı")
 
     def _handle_button(self, button):
-        if button == BTN_OPTIONS:
-            print("[ÇIKIŞ] Options basıldı")
-            self.running = False
-        elif button == BTN_PS:
-            print("[ACİL] PS butonu - Robot devre dışı!")
+        _BTN_NAMES = {}
+        # Sadece GEÇERLİ (negatif olmayan) sabitleri isim tablosuna ekle
+        for _btn, _lbl in (
+            (BTN_CROSS, "× Cross"), (BTN_CIRCLE, "○ Circle"),
+            (BTN_SQUARE, "□ Square"), (BTN_TRIANGLE, "△ Triangle"),
+            (BTN_L1, "L1"), (BTN_R1, "R1"),
+            (BTN_L2, "L2"), (BTN_R2, "R2"),
+            (BTN_SHARE, "SHARE"), (BTN_OPTIONS, "OPTIONS"),
+            (BTN_L3, "L3"), (BTN_R3, "R3"), (BTN_PS, "PS"),
+            (BTN_HOME_GO, "HOME_GO"), (BTN_SURGERY_GO, "SURGERY_GO"),
+        ):
+            if _btn >= 0 and _btn not in _BTN_NAMES:
+                _BTN_NAMES[_btn] = f"{_lbl}(B{_btn})"
+        name = _BTN_NAMES.get(button, f"B{button}(atanmamış)")
+
+        # Her eşleşme için butonun geçerli (>=0) olduğunu da kontrol et
+        def _is(target):
+            return target >= 0 and button == target
+
+        if _is(BTN_SQUARE):
+            print(f"[BUTON] {name} → ACİL STOP (Robot Disable)")
             self.disable_robot()
-        elif button == BTN_SHARE:
-            self.toggle_mode()
-        elif button == BTN_R1:
+        elif _is(BTN_L1):
+            print(f"[BUTON] {name} → Robot Disable (Linux: L1)")
+            self.disable_robot()
+        elif _is(BTN_R1):
+            print(f"[BUTON] {name} → Robot Enable (Linux: R1)")
             self.enable_robot()
-        elif button == BTN_L1:
-            self.disable_robot()
-        elif button == BTN_TRIANGLE:
-            self.set_speed(self.speed + SPEED_STEP)
-        elif button == BTN_CROSS:
-            self.set_speed(self.speed - SPEED_STEP)
-        elif button == BTN_SQUARE:
-            print("[DURDUR] Kare basıldı")
+        elif _is(BTN_OPTIONS):
+            print(f"[BUTON] {name} → Durdur (MoveJog stop)")
             self._force_stop()
-        elif button == BTN_CIRCLE:
-            self.toggle_drag()
-        elif button == BTN_L3:
+        elif _is(BTN_L3):
+            print(f"[BUTON] {name} → Home pozisyonu KAYDET")
             self.save_home()
-        elif button == BTN_R3:
+        elif _is(BTN_R3):
+            print(f"[BUTON] {name} → Ameliyat pozisyonu KAYDET")
             self.save_surgery()
+        elif _is(BTN_SHARE):
+            print(f"[BUTON] {name} → Mod değiştir (Eklem ↔ Tool)")
+            self.toggle_mode()
+        elif _is(BTN_HOME_GO):
+            print(f"[BUTON] {name} → HOME pozisyonuna git")
+            self.go_to_position(self.home_joints, "HOME")
+        elif _is(BTN_SURGERY_GO):
+            print(f"[BUTON] {name} → AMELİYAT pozisyonuna git")
+            self.go_to_position(self.surgery_joints, "AMELİYAT")
+        elif _is(BTN_TRIANGLE):
+            print(f"[BUTON] {name} → Hız artır (%{self.speed} → %{min(self.speed+SPEED_STEP, SPEED_MAX)})")
+            self.set_speed(self.speed + SPEED_STEP)
+        elif _is(BTN_CROSS):
+            print(f"[BUTON] {name} → Hız azalt (%{self.speed} → %{max(self.speed-SPEED_STEP, SPEED_MIN)})")
+            self.set_speed(self.speed - SPEED_STEP)
+        elif _is(BTN_CIRCLE):
+            print(f"[BUTON] {name} → Drag modu")
+            self.toggle_drag()
+        elif _is(BTN_PS):
+            print(f"[BUTON] {name} → (devre dışı)")
+        elif _is(BTN_DPAD_UP) or _is(BTN_DPAD_DOWN):
+            # D-Pad Y, _handle_axes içinde sürekli okunur - ekstra log yok
+            pass
+        else:
+            print(f"[BUTON] B{button} → (atanmamış)")
 
     def _handle_dpad(self, value):
         """D-Pad olaylarını işle: sol/sağ=pozisyon git, yukarı/aşağı=jog"""
         hat_x, hat_y = value
-        if hat_x == -1:  # D-Pad Sol
+        if hat_x == -1:
+            print("[D-PAD] ◄ Sol → HOME pozisyonuna git")
             self.go_to_position(self.home_joints, "HOME")
-        elif hat_x == 1:  # D-Pad Sağ
+        elif hat_x == 1:
+            print("[D-PAD] ► Sağ → AMELİYAT pozisyonuna git")
             self.go_to_position(self.surgery_joints, "AMELİYAT")
 
     def _handle_axes(self, js):
@@ -696,6 +819,14 @@ class JoystickRobotController:
         l2 = js.get_axis(AXIS_L2)
         r2 = js.get_axis(AXIS_R2)
         hat = js.get_hat(0) if js.get_numhats() > 0 else (0, 0)
+
+        # D-Pad Y (yukarı/aşağı) — platformdan bağımsız sentetik değer:
+        # Linux'ta hat[1] gelir, Windows'ta buton (11/12) gelir.
+        dpad_y = hat[1]
+        if BTN_DPAD_UP >= 0 and js.get_button(BTN_DPAD_UP):
+            dpad_y = 1
+        elif BTN_DPAD_DOWN >= 0 and js.get_button(BTN_DPAD_DOWN):
+            dpad_y = -1
 
         candidates = []
 
@@ -718,8 +849,8 @@ class JoystickRobotController:
                 candidates.append(("J5-", r2_val, "J5-"))
 
             # D-Pad yukarı/aşağı → J6 (sol/sağ artık pozisyon gitme)
-            if hat[1] != 0:
-                candidates.append(("J6", 1.0, "J6+" if hat[1] > 0 else "J6-"))
+            if dpad_y != 0:
+                candidates.append(("J6", 1.0, "J6+" if dpad_y > 0 else "J6-"))
 
         else:
             # --- TOOL MODU ---
@@ -746,8 +877,8 @@ class JoystickRobotController:
                 candidates.append(("Rx+", r2_val, "Rx+"))
 
             # D-Pad Y: Rz dönüş = kafa yatırma
-            if hat[1] != 0:
-                candidates.append(("Rz", 1.0, "Rz+" if hat[1] > 0 else "Rz-"))
+            if dpad_y != 0:
+                candidates.append(("Rz", 1.0, "Rz+" if dpad_y > 0 else "Rz-"))
 
         if candidates:
             candidates.sort(key=lambda c: c[1], reverse=True)
