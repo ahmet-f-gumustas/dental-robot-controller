@@ -1,6 +1,6 @@
 """
-Dobot Nova 5 - PyQt5 GUI + PS5 Joystick Kontrol
-joystick_control.py üzerine görsel arayüz.
+Dobot Nova 5 - PyQt5 GUI + PS5 joystick controller.
+Graphical frontend on top of joystick_control.py.
 """
 
 import sys
@@ -30,7 +30,9 @@ from dobot_api import DobotApiDashboard
 from joystick_control import (
     JoystickRobotController, ROBOT_IP, DASHBOARD_PORT,
     HOME_JOINTS, SURGERY_JOINTS, MOVJ_SPEED,
-    MODE_JOINT, MODE_TOOL, SPEED_MIN, SPEED_MAX, SPEED_STEP,
+    MODE_JOINT, MODE_TOOL, MODE_LABELS_TR,
+    POS_HOME, POS_SURGERY,
+    SPEED_MIN, SPEED_MAX, SPEED_STEP,
     DEADZONE, LOOP_HZ,
     AXIS_LX, AXIS_LY, AXIS_L2, AXIS_RX, AXIS_RY, AXIS_R2,
     BTN_CROSS, BTN_CIRCLE, BTN_TRIANGLE, BTN_SQUARE,
@@ -39,7 +41,7 @@ from joystick_control import (
 
 
 class JoystickTestDialog(QDialog):
-    """Robot bağlantısı olmadan joystick eksen ve buton değerlerini canlı gösterir."""
+    """Live viewer for joystick axes and buttons without needing a robot connection."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,18 +70,18 @@ class JoystickTestDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # Joystick seç / durum
+        # Joystick status
         self.lbl_js_name = QLabel("Joystick aranıyor...")
         self.lbl_js_name.setFont(QFont("Arial", 13, QFont.Bold))
         self.lbl_js_name.setStyleSheet("color: #f9e2af; padding: 4px;")
         layout.addWidget(self.lbl_js_name)
 
-        # Eksenler grubu
+        # Axis group
         self.axes_group = QGroupBox("Eksenler")
         self.axes_layout = QGridLayout(self.axes_group)
         layout.addWidget(self.axes_group)
 
-        # Butonlar grubu
+        # Button group
         self.btns_group = QGroupBox("Butonlar")
         self.btns_layout = QGridLayout(self.btns_group)
         layout.addWidget(self.btns_group)
@@ -102,7 +104,7 @@ class JoystickTestDialog(QDialog):
         self.timer.start(50)
 
     def _build_ui(self):
-        # Önceki widget'ları temizle
+        # Clear existing widgets
         for i in reversed(range(self.axes_layout.count())):
             self.axes_layout.itemAt(i).widget().deleteLater()
         for i in reversed(range(self.btns_layout.count())):
@@ -122,7 +124,7 @@ class JoystickTestDialog(QDialog):
         self.lbl_js_name.setText(f"Bağlı: {self.js.get_name()}")
         self.lbl_js_name.setStyleSheet("color: #a6e3a1; font-weight: bold; padding: 4px;")
 
-        # Eksen satırları
+        # Axis rows
         for i in range(self.js.get_numaxes()):
             lbl_name = QLabel(f"Eksen {i}")
             lbl_name.setFixedWidth(70)
@@ -143,7 +145,7 @@ class JoystickTestDialog(QDialog):
             self.axis_bars.append(bar)
             self.axis_labels.append(lbl_val)
 
-        # Buton grid'i (5 sütun)
+        # Button grid (5 columns)
         cols = 5
         for i in range(self.js.get_numbuttons()):
             lbl = QLabel(f"B{i}")
@@ -161,14 +163,14 @@ class JoystickTestDialog(QDialog):
         pygame.event.pump()
 
         if self.js is None:
-            # Joystick takılmış mı tekrar kontrol et
+            # Re-check for a newly plugged-in joystick
             pygame.joystick.quit()
             pygame.joystick.init()
             if pygame.joystick.get_count() > 0:
                 self._build_ui()
             return
 
-        # Eksenler
+        # Axes
         for i, (bar, lbl_val) in enumerate(zip(self.axis_bars, self.axis_labels)):
             val = self.js.get_axis(i)
             bar.setValue(int(val * 100))
@@ -182,7 +184,7 @@ class JoystickTestDialog(QDialog):
                     "QProgressBar::chunk { background-color: #89b4fa; border-radius: 4px; }"
                 )
 
-        # Butonlar
+        # Buttons
         for i, lbl in enumerate(self.btn_labels):
             pressed = self.js.get_button(i)
             if pressed:
@@ -190,7 +192,7 @@ class JoystickTestDialog(QDialog):
                     "background-color: #a6e3a1; color: #1e1e2e; "
                     "border-radius: 6px; border: 1px solid #a6e3a1; font-weight: bold;"
                 )
-                lbl.setText(f"B{i} ●")
+                lbl.setText(f"B{i} *")
             else:
                 lbl.setStyleSheet(
                     "background-color: #313244; color: #6c7086; "
@@ -206,7 +208,7 @@ class JoystickTestDialog(QDialog):
 
 
 class SignalBridge(QObject):
-    """Thread-safe sinyal köprüsü: worker thread → GUI"""
+    """Thread-safe signal bridge: worker thread -> GUI."""
     log = pyqtSignal(str)
     status_update = pyqtSignal(dict)
 
@@ -224,7 +226,7 @@ class RobotGUI(QMainWindow):
         self._init_ui()
         self._redirect_print()
 
-        # Durum güncelleme timer'ı
+        # Status refresh timer
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._poll_status)
         self.status_timer.start(500)
@@ -270,10 +272,10 @@ class RobotGUI(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setSpacing(8)
 
-        # === ÜST SATIR: Durum + Mod ===
+        # === TOP ROW: Status + Mode ===
         top_row = QHBoxLayout()
 
-        # Robot durumu
+        # Robot status
         status_group = QGroupBox("Robot Durumu")
         status_grid = QGridLayout(status_group)
 
@@ -290,11 +292,11 @@ class RobotGUI(QMainWindow):
 
         top_row.addWidget(status_group)
 
-        # Kontrol modu
+        # Control mode
         mode_group = QGroupBox("Kontrol Modu")
         mode_layout = QVBoxLayout(mode_group)
 
-        self.lbl_mode = QLabel("EKLEM")
+        self.lbl_mode = QLabel(MODE_LABELS_TR.get(self.controller.mode, self.controller.mode))
         self.lbl_mode.setFont(QFont("Arial", 28, QFont.Bold))
         self.lbl_mode.setAlignment(Qt.AlignCenter)
         self.lbl_mode.setStyleSheet("color: #a6e3a1;")
@@ -308,7 +310,7 @@ class RobotGUI(QMainWindow):
 
         top_row.addWidget(mode_group)
 
-        # Hız
+        # Speed
         speed_group = QGroupBox("Hız")
         speed_layout = QVBoxLayout(speed_group)
 
@@ -331,7 +333,7 @@ class RobotGUI(QMainWindow):
 
         top_row.addWidget(speed_group)
 
-        # Tool mesafesi
+        # Tool distance
         tool_group = QGroupBox("Tool Mesafesi (TCP)")
         tool_layout = QVBoxLayout(tool_group)
 
@@ -342,7 +344,7 @@ class RobotGUI(QMainWindow):
         tool_layout.addWidget(self.lbl_tool_dist)
 
         self.slider_tool = QSlider(Qt.Horizontal)
-        self.slider_tool.setRange(10, 500)  # 1cm - 50cm
+        self.slider_tool.setRange(10, 500)  # 1 cm - 50 cm
         self.slider_tool.setValue(self.controller.tool_distance)
         self.slider_tool.setTickInterval(50)
         self.slider_tool.setStyleSheet("""
@@ -362,7 +364,7 @@ class RobotGUI(QMainWindow):
         top_row.addWidget(tool_group)
         main_layout.addLayout(top_row)
 
-        # === ORTA SATIR: Pozisyon Butonları ===
+        # === MIDDLE ROW: Position buttons ===
         pos_group = QGroupBox("Pozisyon Kontrol")
         pos_layout = QHBoxLayout(pos_group)
 
@@ -372,7 +374,7 @@ class RobotGUI(QMainWindow):
             QPushButton:hover { background-color: #2a7bff; }
         """)
         self.btn_home.clicked.connect(lambda: self._run_async(
-            lambda: self.controller.go_to_position(self.controller.home_joints, "HOME")
+            lambda: self.controller.go_to_position(self.controller.home_joints, POS_HOME)
         ))
 
         self.btn_save_home = QPushButton("HOME\nPOZ. KAYDET")
@@ -388,7 +390,7 @@ class RobotGUI(QMainWindow):
             QPushButton:hover { background-color: #ff5566; }
         """)
         self.btn_surgery.clicked.connect(lambda: self._run_async(
-            lambda: self.controller.go_to_position(self.controller.surgery_joints, "AMELİYAT")
+            lambda: self.controller.go_to_position(self.controller.surgery_joints, POS_SURGERY)
         ))
 
         self.btn_save_surgery = QPushButton("AMELİYAT\nPOZ. KAYDET")
@@ -430,32 +432,32 @@ class RobotGUI(QMainWindow):
 
         main_layout.addWidget(pos_group)
 
-        # === JOYSTICK HARİTASI ===
+        # === JOYSTICK MAP ===
         map_group = QGroupBox("Joystick Haritası (Hangi Tuş Ne Yapar)")
         map_layout = QHBoxLayout(map_group)
 
-        eklem_text = (
+        joint_text = (
             "EKLEM MODU\n"
-            "Sol Analog Y → J1 (taban)\n"
-            "Sol Analog X → J2 (omuz)\n"
-            "Sağ Analog Y → J3 (dirsek)\n"
-            "Sağ Analog X → J4 (bilek)\n"
-            "L2 / R2        → J5\n"
-            "D-Pad ▲▼      → J6"
+            "Sol Analog Y -> J1 (taban)\n"
+            "Sol Analog X -> J2 (omuz)\n"
+            "Sağ Analog Y -> J3 (dirsek)\n"
+            "Sağ Analog X -> J4 (bilek)\n"
+            "L2 / R2        -> J5\n"
+            "D-Pad YUKARI/AŞAĞI -> J6"
         )
         tool_text = (
             "TOOL MODU\n"
-            "Sol Analog Y → X (ileri/geri)\n"
-            "Sol Analog X → Y (sol/sağ)\n"
-            "Sağ Analog Y → Z (yukarı/aşağı)\n"
-            "Sağ Analog X → Ry (kafa sola/sağa)\n"
-            "L2 / R2        → Rx (kafa yukarı/aşağı)\n"
-            "D-Pad ▲▼      → Rz (kafa yatırma)"
+            "Sol Analog Y -> X (ileri/geri)\n"
+            "Sol Analog X -> Y (sol/sağ)\n"
+            "Sağ Analog Y -> Z (yukarı/aşağı)\n"
+            "Sağ Analog X -> Ry (kafa sola/sağa)\n"
+            "L2 / R2        -> Rx (kafa yukarı/aşağı)\n"
+            "D-Pad YUKARI/AŞAĞI -> Rz (kafa yatırma)"
         )
 
-        lbl_eklem = QLabel(eklem_text)
-        lbl_eklem.setFont(QFont("monospace", 10))
-        lbl_eklem.setStyleSheet("color: #a6e3a1; padding: 8px;")
+        lbl_joint = QLabel(joint_text)
+        lbl_joint.setFont(QFont("monospace", 10))
+        lbl_joint.setStyleSheet("color: #a6e3a1; padding: 8px;")
 
         lbl_tool = QLabel(tool_text)
         lbl_tool.setFont(QFont("monospace", 10))
@@ -463,20 +465,20 @@ class RobotGUI(QMainWindow):
 
         lbl_btns = QLabel(
             "BUTONLAR\n"
-            "□  Acil durdur (Disable)\n"
-            "△  Hız artır    ×  Hız azalt\n"
-            "○  Sürükleme (drag) modu\n"
-            "SHARE  Eklem ↔ Tool modu\n"
+            "Kare    Acil durdur (Disable)\n"
+            "Üçgen   Hız artır    Çarpı  Hız azalt\n"
+            "Daire   Sürükleme (drag) modu\n"
+            "SHARE   Eklem <-> Tool modu\n"
             "L1  Robotu kapat   R1  Robotu aç\n"
             "L3  Home kaydet    R3  Ameliyat kaydet\n"
             "OPTIONS  Hareketi durdur\n"
-            "D-Pad ◄  HOME'a git\n"
-            "D-Pad ►  AMELİYAT'a git"
+            "D-Pad SOL  HOME'a git\n"
+            "D-Pad SAĞ  AMELİYAT'a git"
         )
         lbl_btns.setFont(QFont("monospace", 10))
         lbl_btns.setStyleSheet("color: #89b4fa; padding: 8px;")
 
-        map_layout.addWidget(lbl_eklem)
+        map_layout.addWidget(lbl_joint)
         map_layout.addWidget(self._vsep())
         map_layout.addWidget(lbl_tool)
         map_layout.addWidget(self._vsep())
@@ -493,7 +495,7 @@ class RobotGUI(QMainWindow):
         log_layout.addWidget(self.log_text)
         main_layout.addWidget(log_group)
 
-        # === ALT BAR: Başlat/Durdur/Test ===
+        # === BOTTOM BAR: Start/Stop/Test ===
         bottom = QHBoxLayout()
         self.btn_start = QPushButton("JOYSTICK KONTROLÜNÜ BAŞLAT")
         self.btn_start.setStyleSheet("""
@@ -533,7 +535,7 @@ class RobotGUI(QMainWindow):
         return sep
 
     def _redirect_print(self):
-        """print() çıktılarını GUI log'a yönlendir"""
+        """Redirect print() output to the GUI log."""
         import builtins
         original_print = builtins.print
         def gui_print(*args, **kwargs):
@@ -548,20 +550,21 @@ class RobotGUI(QMainWindow):
             self._set_start_btn_state(state)
             return
 
-        # Anahtar kelimelere göre renkli HTML log
+        # Color log lines by keyword (log output is English; see controller prints)
         import html
         safe = html.escape(text)
-        if "[OK]" in text or "bağlandı" in text.lower() or "hazır" in text.lower():
+        lower = text.lower()
+        if "[ok]" in lower or "ready" in lower or "connected" in lower or "reached" in lower:
             html_line = f'<span style="color:#a6e3a1;">{safe}</span>'
-        elif "[HATA]" in text or "hata" in text.lower() or "error" in text.lower():
+        elif "[error]" in lower or "error" in lower or "failed" in lower:
             html_line = f'<span style="color:#f38ba8;font-weight:bold;">{safe}</span>'
-        elif "[UYARI]" in text or "uyarı" in text.lower():
+        elif "[warn]" in lower or "warn" in lower:
             html_line = f'<span style="color:#f9e2af;">{safe}</span>'
-        elif "joystick" in text.lower():
+        elif "joystick" in lower:
             html_line = f'<span style="color:#89dceb;font-weight:bold;">{safe}</span>'
-        elif "enable" in text.lower() or "etkin" in text.lower():
+        elif "enable" in lower:
             html_line = f'<span style="color:#a6e3a1;font-weight:bold;">{safe}</span>'
-        elif "stop" in text.lower() or "durdur" in text.lower() or "acil" in text.lower():
+        elif "stop" in lower or "emergency" in lower or "disable" in lower:
             html_line = f'<span style="color:#fab387;font-weight:bold;">{safe}</span>'
         else:
             html_line = f'<span style="color:#a6adc8;">{safe}</span>'
@@ -572,12 +575,12 @@ class RobotGUI(QMainWindow):
         )
 
     def _on_tool_slider_changed(self, value):
-        """Slider sürüklenirken sadece etiketi güncelle"""
+        """Update the label while the slider is being dragged."""
         self.lbl_tool_dist.setText(f"{value}mm")
         self.lbl_tool_cm.setText(f"{value/10:.0f} cm")
 
     def _on_tool_slider_released(self):
-        """Slider bırakıldığında robota gönder ve kaydet"""
+        """On release, push the value to the robot and persist it."""
         value = self.slider_tool.value()
         self._run_async(lambda: self.controller.set_tool_distance(value))
 
@@ -585,10 +588,10 @@ class RobotGUI(QMainWindow):
         threading.Thread(target=func, daemon=True).start()
 
     def _poll_status(self):
-        """GUI durum güncellemesi (ana thread'de çalışır)"""
+        """Refresh the GUI status indicators (runs on the main thread)."""
         c = self.controller
 
-        # Bağlantı
+        # Connection
         if c.dashboard:
             self.lbl_connection.setText(ROBOT_IP)
             self.lbl_connection.setStyleSheet("color: #a6e3a1; font-weight: bold;")
@@ -596,14 +599,15 @@ class RobotGUI(QMainWindow):
             self.lbl_connection.setText("Bağlantı Yok")
             self.lbl_connection.setStyleSheet("color: #f38ba8; font-weight: bold;")
 
-        # Mod
-        self.lbl_mode.setText(c.mode)
+        # Mode
+        mode_label = MODE_LABELS_TR.get(c.mode, c.mode)
+        self.lbl_mode.setText(mode_label)
         if c.mode == MODE_TOOL:
             self.lbl_mode.setStyleSheet("color: #f9e2af; font-size: 28px; font-weight: bold;")
         else:
             self.lbl_mode.setStyleSheet("color: #a6e3a1; font-size: 28px; font-weight: bold;")
 
-        # Aktif jog
+        # Active jog
         if c.active_jog:
             self.lbl_active_jog.setText(f"Aktif hareket: {c.active_jog}")
             self.lbl_active_jog.setStyleSheet("color: #f9e2af; font-size: 14px;")
@@ -611,16 +615,16 @@ class RobotGUI(QMainWindow):
             self.lbl_active_jog.setText("Hareketsiz")
             self.lbl_active_jog.setStyleSheet("color: #6c7086; font-size: 14px;")
 
-        # Hız
+        # Speed
         self.lbl_speed.setText(f"%{c.speed}")
         self.speed_bar.setValue(c.speed)
 
-        # Tool mesafesi (slider hareket etmiyorken güncelle)
+        # Tool distance (update only while the slider is idle)
         if not self.slider_tool.isSliderDown():
             self.lbl_tool_dist.setText(f"{c.tool_distance}mm")
             self.lbl_tool_cm.setText(f"{c.tool_distance/10:.0f} cm")
 
-        # Hata
+        # Errors
         if c.error_state:
             self.lbl_errors.setText("Hata var")
             self.lbl_errors.setStyleSheet("color: #f38ba8; font-weight: bold;")
@@ -629,7 +633,7 @@ class RobotGUI(QMainWindow):
             self.lbl_errors.setStyleSheet("color: #a6e3a1; font-weight: bold;")
 
     def _set_start_btn_state(self, state):
-        """Başlat butonunun durumunu ayarla: 'ready', 'running', 'no_joystick', 'no_robot'"""
+        """Set the start button state: 'ready', 'running', 'no_joystick', 'no_robot'."""
         styles = {
             "ready": ("JOYSTICK KONTROLÜNÜ BAŞLAT", True,
                 "QPushButton { background-color: #40a02b; color: white; font-size: 15px; padding: 10px; }"
@@ -656,12 +660,12 @@ class RobotGUI(QMainWindow):
         threading.Thread(target=self._joystick_loop, daemon=True).start()
 
     def _joystick_loop(self):
-        """Joystick kontrol döngüsü (ayrı thread)"""
+        """Joystick control loop (runs on a worker thread)."""
         pygame.init()
         pygame.joystick.init()
 
         if pygame.joystick.get_count() == 0:
-            print("[HATA] Joystick bulunamadı! Bağlayıp tekrar dene.")
+            print("[ERROR] No joystick detected! Plug one in and retry.")
             self.worker_running = False
             self.signals.log.emit("__STATE__:no_joystick")
             pygame.quit()
@@ -669,8 +673,8 @@ class RobotGUI(QMainWindow):
 
         js = pygame.joystick.Joystick(0)
         js.init()
-        print(f"[OK] Joystick bağlandı: {js.get_name()} "
-              f"({js.get_numaxes()} eksen, {js.get_numbuttons()} buton)")
+        print(f"[OK] Joystick connected: {js.get_name()} "
+              f"({js.get_numaxes()} axes, {js.get_numbuttons()} buttons)")
 
         if not self.controller.connect():
             self.worker_running = False
@@ -695,7 +699,7 @@ class RobotGUI(QMainWindow):
                 time.sleep(loop_delay)
 
         except Exception as e:
-            print(f"[HATA] Joystick döngüsü: {e}")
+            print(f"[ERROR] Joystick loop: {e}")
         finally:
             self.controller._force_stop()
             self.controller.disconnect()
@@ -703,7 +707,7 @@ class RobotGUI(QMainWindow):
             pygame.quit()
             self.worker_running = False
             self.signals.log.emit("__STATE__:ready")
-            print("[OK] Joystick durduruldu")
+            print("[OK] Joystick stopped")
 
     def _open_joystick_test(self):
         dlg = JoystickTestDialog(self)

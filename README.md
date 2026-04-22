@@ -1,27 +1,27 @@
 # Dental Robot Controller
 
-Dobot Nova 5 robotunu PS5 DualSense joystick ile kontrol etmek için geliştirilmiş Python arayüzü. Diş sağlığı uygulamaları için tool koordinat sistemi, drag öğretme ve PyQt5 grafik arayüzü içerir.
+Python-based interface for controlling a Dobot Nova 5 robot with a PS5 DualSense joystick. Targets dental surgery workflows with a tool-coordinate system, drag-teach mode, and a PyQt5 GUI.
 
-## Özellikler
+## Features
 
-- **Çift Kontrol Modu**
-  - **Eklem Modu** (J1-J6): Kabaca pozisyonlama, singularity sorunsuz
-  - **Tool Modu**: Tool noktası (TCP) etrafında hassas dönüş - hasta yüzüne sabitlenmiş flanş simülasyonu
-- **Drag Öğretme**: Robotu elle sürükleyip pozisyon kaydetme
-- **Sabit Pozisyonlar**: Home ve Ameliyat pozisyonlarını kaydet, tek tuşla git
-- **Tool Mesafesi Ayarı**: 1cm - 50cm arası slider ile runtime ayarı
-- **PyQt5 Arayüzü**: Durum göstergesi, hız kontrolü, log ekranı
-- **Otomatik Hata Kurtarma**: Singularity, collision, mode 7 sorunlarında otomatik toparlama
-- **JSON Konfigürasyon**: Tüm ayarlar `settings.json` üzerinden
+- **Dual Control Modes**
+  - **Joint Mode** (J1-J6): Coarse positioning, free of singularity issues
+  - **Tool Mode**: Precise rotation around the tool center point (TCP), simulating a flange locked to the patient's face
+- **Drag Teach**: Manually drag the robot and capture the pose
+- **Saved Positions**: Store Home and Surgery poses, recall with a single button
+- **Tool Distance Slider**: 1 cm - 50 cm runtime adjustment
+- **PyQt5 GUI**: Status indicators, speed control, live log
+- **Automatic Error Recovery**: Auto-recovery from singularity, collision, and Mode 7 issues
+- **JSON Configuration**: Every parameter lives in `settings.json`
 
-## Gereksinimler
+## Requirements
 
 - Python 3.10+
 - Dobot Nova 5 robot (TCP/IP V4 firmware)
-- PS5 DualSense joystick (Linux için)
-- Ağ bağlantısı: Robot varsayılan IP 192.168.5.1
+- PS5 DualSense joystick
+- Network connection: robot default IP `192.168.5.1`
 
-## Kurulum
+## Installation
 
 ```bash
 git clone https://github.com/ahmet-f-gumustas/dental-robot-controller.git
@@ -29,68 +29,68 @@ cd dental-robot-controller
 pip install -r requirements.txt
 ```
 
-## Kullanım
+## Usage
 
-### GUI ile (önerilen)
+### GUI (recommended)
 
 ```bash
 python3 gui_control.py
 ```
 
-### Sadece Joystick
+### Joystick only
 
 ```bash
 python3 joystick_control.py
 ```
 
-### Pozisyon Ayarlama Akışı
+### Position Setup Workflow
 
-1. **Joystick Başlat** butonuna tıkla
-2. Joystick ile robotu home pozisyonuna getir
-3. **[HOME KAYDET]** butonuna tıkla
-4. Robotu ameliyat pozisyonuna getir
-5. **[AMELİYAT KAYDET]** butonuna tıkla
-6. Artık **D-Pad Sol** ile home'a, **D-Pad Sağ** ile ameliyat pozisyonuna tek tuşla gidilir
-7. Tool mesafesi slider'ı ile TCP uzaklığını ayarla (varsayılan 35cm)
+1. Click **Start Joystick**
+2. Drive the robot to the home pose with the joystick
+3. Click **[SAVE HOME]**
+4. Drive the robot to the surgery pose
+5. Click **[SAVE SURGERY]**
+6. From now on, **D-Pad Left** jumps to home and **D-Pad Right** jumps to the surgery pose
+7. Adjust the TCP offset with the tool distance slider (default 35 cm)
 
-## Kontrol Şeması
+## Control Scheme
 
-### Eklem Modu
-| Kontrol | Fonksiyon |
-|---------|-----------|
-| Sol Analog Y | J1 (taban) |
-| Sol Analog X | J2 (omuz) |
-| Sağ Analog Y | J3 (dirsek) |
-| Sağ Analog X | J4 (bilek 1) |
-| L2 / R2 | J5 (bilek 2) |
-| D-Pad Y | J6 (uç) |
+### Joint Mode
+| Control | Function |
+|---------|----------|
+| Left Stick Y | J1 (base) |
+| Left Stick X | J2 (shoulder) |
+| Right Stick Y | J3 (elbow) |
+| Right Stick X | J4 (wrist 1) |
+| L2 / R2 | J5 (wrist 2) |
+| D-Pad Y | J6 (tip) |
 
-### Tool Modu (hastanın yüzü sabit, flanş etrafında döner)
-| Kontrol | Fonksiyon |
-|---------|-----------|
-| Sol Analog | X/Y kaydırma (tool eksenlerinde) |
-| Sağ Analog Y | Z kaydırma |
-| **Sağ Analog X** | **Ry dönüş** (kafa sola/sağa) |
-| **L2 / R2** | **Rx dönüş** (kafa yukarı/aşağı) |
-| **D-Pad Y** | **Rz dönüş** (kafa yatırma) |
+### Tool Mode (patient face fixed, rotate around the flange)
+| Control | Function |
+|---------|----------|
+| Left Stick | X/Y translation (in tool axes) |
+| Right Stick Y | Z translation |
+| **Right Stick X** | **Ry rotation** (head left/right) |
+| **L2 / R2** | **Rx rotation** (head up/down) |
+| **D-Pad Y** | **Rz rotation** (head tilt) |
 
-### Butonlar
-| Buton | Fonksiyon |
-|-------|-----------|
-| SHARE | Mod değiştir (Eklem ↔ Tool) |
-| Üçgen / X | Hız +/- |
-| Kare | Durdur |
-| Daire | Drag modu aç/kapat |
+### Buttons
+| Button | Function |
+|--------|----------|
+| SHARE | Switch mode (Joint <-> Tool) |
+| Triangle / X | Speed +/- |
+| Square | Stop |
+| Circle | Toggle drag mode |
 | R1 | Enable |
 | L1 | Disable |
-| D-Pad Sol/Sağ | Home / Ameliyat pozisyonuna git |
-| L3 / R3 | Home / Ameliyat kaydet |
-| Options | Çıkış |
-| PS | Acil durdurma |
+| D-Pad Left/Right | Go to Home / Surgery pose |
+| L3 / R3 | Save Home / Surgery pose |
+| Options | Quit |
+| PS | Emergency stop |
 
-## Konfigürasyon
+## Configuration
 
-`settings.json` dosyası ilk çalıştırmada otomatik oluşur:
+`settings.json` is created automatically on first launch:
 
 ```json
 {
@@ -115,7 +115,7 @@ python3 joystick_control.py
 }
 ```
 
-Pozisyonlar `positions.json` dosyasında saklanır:
+Saved poses live in `positions.json`:
 
 ```json
 {
@@ -125,52 +125,52 @@ Pozisyonlar `positions.json` dosyasında saklanır:
 }
 ```
 
-## Proje Yapısı
+## Project Layout
 
 ```
 .
-├── gui_control.py          # PyQt5 grafik arayüzü (ana uygulama)
-├── joystick_control.py     # Çekirdek kontrol sınıfı + joystick döngüsü
-├── robot_diagnose.py       # Robot durumu teşhis scripti
-├── tool_test.py            # Tool koordinat sistemi testi
-├── joystick_test.py        # PS5 buton/axis haritalama testi
-├── robot_config_reader.py  # Tam robot konfigürasyon okuyucu
-├── robot_connection_test.py # Basit TCP bağlantı testi
-├── collision_close.py      # Collision/SafeSkin kapatma
-├── TCP-IP-Python-V4/       # Dobot resmi Python SDK
-├── settings.json           # Kullanıcı ayarları (otomatik oluşur)
-└── positions.json          # Kaydedilmiş pozisyonlar (otomatik oluşur)
+├── gui_control.py          # PyQt5 GUI (main application)
+├── joystick_control.py     # Core controller class + joystick loop
+├── robot_diagnose.py       # Robot diagnostics script
+├── tool_test.py            # Tool coordinate system test
+├── joystick_test.py        # PS5 button/axis mapping test
+├── robot_config_reader.py  # Full robot configuration reader
+├── robot_connection_test.py# Simple TCP connection test
+├── collision_close.py      # Collision/SafeSkin disabler
+├── TCP-IP-Python-V4/       # Official Dobot Python SDK
+├── settings.json           # User settings (auto-generated)
+└── positions.json          # Saved poses (auto-generated)
 ```
 
-## Bilinen Kısıtlamalar
+## Known Limitations
 
-1. **Wrist Singularity**: J5 ≈ 0°/360° pozisyonunda kartezyen/tool jog Error 30 verir. Eklem moduyla J5'i ±45° değerine getirip tool moduna geçin.
-2. **Tek Eksen Jog**: Aynı anda tek eksen hareketi (MoveJog sınırı). En baskın eksen seçilir.
-3. **DualSense Axis Haritası**: Linux SDL2 standart değildir. Kodda doğru harita tanımlı (Axis 2 = L2, Axis 3 = Sağ X).
+1. **Wrist Singularity**: Cartesian/tool jog throws Error 30 when J5 is near 0 deg / 360 deg. Switch to Joint Mode, bring J5 to ~+/-45 deg, then re-enter Tool Mode.
+2. **Single-axis Jog**: Only one axis moves at a time (MoveJog limitation). The most dominant axis is selected.
+3. **DualSense Axis Mapping**: Linux SDL2 mapping is non-standard. The correct mapping is hardcoded (Axis 2 = L2, Axis 3 = Right X).
 
-## Yaygın Hatalar
+## Common Errors
 
-| Hata Kodu | Sebep | Çözüm |
-|-----------|-------|-------|
-| `-1` | Komut reddedildi (meşgul) | Otomatik tekrar dener |
-| `-2` | Durduracak bir şey yok | Normal, görmezden gelin |
-| `-6` | Eksen/hareket tipi uyuşmuyor | `coordtype` parametresi kontrol |
-| `Error 17` | Collision algılandı | `SetCollisionLevel(0)` ile kapatılır |
-| `Error 30` | Ters kinematik başarısız | Singularity - eklem joguyla çıkın |
-| `Mode 7` | Robot kontrolcüsünde program çalışıyor | `Stop()` ile durdurulur |
+| Error Code | Reason | Fix |
+|------------|--------|-----|
+| `-1` | Command rejected (busy) | Retried automatically |
+| `-2` | Nothing to stop | Normal, safe to ignore |
+| `-6` | Axis/motion type mismatch | Check the `coordtype` parameter |
+| `Error 17` | Collision detected | Disabled via `SetCollisionLevel(0)` |
+| `Error 30` | Inverse kinematics failed | Singularity - escape via joint jog |
+| `Mode 7` | A program is running on the controller | Stopped via `Stop()` |
 
-## Uyarı
+## Safety Notice
 
-> ⚠️ **Medikal Kullanım Uyarısı**
+> **Medical-use warning**
 >
-> Bu yazılım araştırma ve geliştirme amaçlıdır. Gerçek hasta üzerinde kullanılmadan önce medikal cihaz onayı (CE/FDA vb.) alınması gerekir. Yazar, bu yazılımın kullanımından doğan hiçbir zarardan sorumlu değildir.
+> This software is intended for research and development. Medical-device certification (CE/FDA, etc.) is required before any use on actual patients. The author assumes no liability for damages arising from the use of this software.
 
-## Lisans
+## License
 
-MIT License - detaylar için [LICENSE](LICENSE) dosyasına bakın.
+MIT License - see [LICENSE](LICENSE) for details.
 
-## Donanım
+## Hardware
 
-- **Robot**: Dobot Nova 5 (tavana ters asılı - 180° montaj açısı)
+- **Robot**: Dobot Nova 5 (ceiling mounted - 180 deg install angle)
 - **Joystick**: Sony PS5 DualSense Wireless Controller
-- **Bağlantı**: Ethernet, TCP/IP V4 protokolü (port 29999)
+- **Link**: Ethernet, TCP/IP V4 protocol (port 29999)
