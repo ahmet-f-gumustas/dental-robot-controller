@@ -1,42 +1,44 @@
 """
-Dobot Nova 5 - PS5 DualSense Joystick Kontrol (Çift Mod)
-TCP/IP V4 protokolü üzerinden MoveJog komutuyla robot kontrolü.
+Dobot Nova 5 - PS5 DualSense joystick controller (dual mode).
+Controls the robot over TCP/IP V4 using the MoveJog command.
 
-İki kontrol modu:
-  [EKLEM MODU] - Kabaca pozisyonlama (J1-J6)
-  [TOOL MODU]  - Hassas ayar, tool noktası etrafında hareket
+Two control modes:
+  [JOINT MODE] - Coarse positioning (J1-J6)
+  [TOOL MODE]  - Fine adjustments around the tool center point
 
-R3 butonu ile modlar arası geçiş yapılır.
+SHARE toggles between modes.
 
-Kontrol Şeması:
-  EKLEM MODU:                      TOOL MODU:
-  Sol Analog Y : J1 taban          Sol Analog Y : X ileri/geri
-  Sol Analog X : J2 omuz           Sol Analog X : Y sol/sağ
-  Sağ Analog Y : J3 dirsek         Sağ Analog Y : Z yukarı/aşağı
-  Sağ Analog X : J4 bilek 1        Sağ Analog X : Rz dönüş
-  L2 / R2      : J5 bilek 2        L2 / R2      : Rx dönüş
-  D-Pad Y      : J6 uç dönüş      D-Pad Y      : Ry dönüş
+Control map:
+  JOINT MODE:                      TOOL MODE:
+  Left Stick Y : J1 base           Left Stick Y : X forward/back
+  Left Stick X : J2 shoulder       Left Stick X : Y left/right
+  Right Stick Y: J3 elbow          Right Stick Y: Z up/down
+  Right Stick X: J4 wrist 1        Right Stick X: Rz rotation
+  L2 / R2      : J5 wrist 2        L2 / R2      : Rx rotation
+  D-Pad Y      : J6 tip rotation   D-Pad Y      : Ry rotation
 
-  Butonlar:
-    R3             → Mod değiştir (Eklem ↔ Tool)
-    X (Cross)      → Hız azalt
-    Üçgen          → Hız artır
-    Kare           → Robotu durdur
-    Daire          → Hataları temizle
-    L1             → Robotu devre dışı bırak
-    R1             → Robotu etkinleştir
-    Options        → Çıkış
-    PS (Home)      → Acil durum
+  Buttons:
+    SHARE          -> Switch mode (Joint <-> Tool)
+    X (Cross)      -> Decrease speed
+    Triangle       -> Increase speed
+    Square         -> Stop robot
+    Circle         -> Clear errors
+    L1             -> Disable robot
+    R1             -> Enable robot
+    Options        -> Quit
+    PS (Home)      -> Emergency stop
 """
 
 import sys
 import os
 
-# PyInstaller bundle veya normal Python çalışmasında doğru klasörü bul
+
 def _app_dir():
+    """Return the correct base directory for both PyInstaller bundles and regular Python runs."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
 
 _BASE_DIR = _app_dir()
 sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
@@ -47,7 +49,7 @@ import time
 
 
 # =============================================================================
-# AYARLAR
+# SETTINGS
 # =============================================================================
 
 import json as _json
@@ -55,7 +57,6 @@ import json as _json
 SETTINGS_FILE = os.path.join(_BASE_DIR, "settings.json")
 POSITIONS_FILE = os.path.join(_BASE_DIR, "positions.json")
 
-# Varsayılan ayarlar
 _DEFAULTS = {
     "robot_ip": "192.168.5.1",
     "dashboard_port": 29999,
@@ -77,8 +78,9 @@ _DEFAULTS = {
     "min_switch_time": 0.15
 }
 
+
 def _load_settings():
-    """settings.json'dan ayarları yükle, yoksa varsayılanları kullan ve dosyayı oluştur"""
+    """Load settings from settings.json; fall back to defaults and create the file if missing."""
     settings = dict(_DEFAULTS)
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -86,12 +88,13 @@ def _load_settings():
                 user = _json.load(f)
             settings.update(user)
         except Exception as e:
-            print(f"[AYAR] settings.json okunamadı: {e}")
+            print(f"[SETTINGS] Failed to read settings.json: {e}")
     else:
         with open(SETTINGS_FILE, 'w') as f:
             _json.dump(_DEFAULTS, f, indent=2)
-        print(f"[AYAR] settings.json oluşturuldu: {SETTINGS_FILE}")
+        print(f"[SETTINGS] Created settings.json: {SETTINGS_FILE}")
     return settings
+
 
 _S = _load_settings()
 
@@ -117,30 +120,30 @@ MIN_SWITCH_TIME = _S["min_switch_time"]
 HOME_JOINTS = None
 SURGERY_JOINTS = None
 
-# PS5 DualSense buton ve axis indeksleri - Windows / Linux farklı
+# PS5 DualSense button and axis indices - Windows and Linux differ
 import platform as _platform
 if _platform.system() == "Windows":
-    # Windows (pygame 2.6 + DualSense - 17 buton)
-    # --- DOĞRULANMIŞ test sonuçları ---
-    BTN_CROSS      = 0    # ✓ Hız azalt
-    BTN_CIRCLE     = 1    # ✓ Drag modu
-    BTN_SQUARE     = 2    # ✓ ACİL STOP
-    BTN_TRIANGLE   = 3    # ✓ Hız artır
-    BTN_SHARE      = 4    # ✓ Mod değiştir (Linux SHARE: toggle_mode)
-    BTN_PS         = 5    # ✓ (atanmamış - kullanıcı isteği)
-    BTN_OPTIONS    = 6    # ✓ Durdur (force_stop)
-    BTN_L3         = 7    # ✓ Home KAYDET (Linux L3)
-    BTN_R3         = 8    # ✓ Ameliyat KAYDET (Linux R3)
-    BTN_L1         = 9    # ✓ Disable robot (Linux L1)
-    BTN_R1         = 10   # ✓ Enable robot (Linux R1)
-    BTN_DPAD_UP    = 11   # ✓ D-Pad Yukarı → J6+ (eklem) / Rz+ (tool)
-    BTN_DPAD_DOWN  = 12   # ✓ D-Pad Aşağı  → J6- (eklem) / Rz- (tool)
-    BTN_HOME_GO    = 13   # ✓ D-Pad Sol → HOME'a git
-    BTN_SURGERY_GO = 14   # ✓ D-Pad Sağ → Ameliyat'a git
-    # B15: Touchpad       (atanmamış)
-    # B16: Mikrofon       Windows OS yakalıyor, event gelmez
-    BTN_L2      = -91     # axis 4, buton olarak yok
-    BTN_R2      = -92     # axis 5, buton olarak yok
+    # Windows (pygame 2.6 + DualSense - 17 buttons)
+    # --- Verified test results ---
+    BTN_CROSS      = 0    # Decrease speed
+    BTN_CIRCLE     = 1    # Drag mode
+    BTN_SQUARE     = 2    # EMERGENCY STOP
+    BTN_TRIANGLE   = 3    # Increase speed
+    BTN_SHARE      = 4    # Switch mode (matches Linux SHARE: toggle_mode)
+    BTN_PS         = 5    # Unassigned (per user request)
+    BTN_OPTIONS    = 6    # Stop (force_stop)
+    BTN_L3         = 7    # Save Home (Linux L3)
+    BTN_R3         = 8    # Save Surgery (Linux R3)
+    BTN_L1         = 9    # Disable robot (Linux L1)
+    BTN_R1         = 10   # Enable robot (Linux R1)
+    BTN_DPAD_UP    = 11   # D-Pad up   -> J6+ (joint) / Rz+ (tool)
+    BTN_DPAD_DOWN  = 12   # D-Pad down -> J6- (joint) / Rz- (tool)
+    BTN_HOME_GO    = 13   # D-Pad left  -> go to HOME
+    BTN_SURGERY_GO = 14   # D-Pad right -> go to SURGERY
+    # B15: touchpad          (unassigned)
+    # B16: microphone        captured by Windows OS, no event
+    BTN_L2      = -91     # axis 4, not a button
+    BTN_R2      = -92     # axis 5, not a button
 else:
     # Linux SDL2
     BTN_CROSS      = 0
@@ -156,14 +159,14 @@ else:
     BTN_PS         = 10
     BTN_L3         = 11
     BTN_R3         = 12
-    BTN_HOME_GO    = -1  # Linux'ta D-Pad (hat) kullanılır
+    BTN_HOME_GO    = -1  # Linux uses D-Pad (hat) events
     BTN_SURGERY_GO = -1
-    BTN_DPAD_UP    = -1  # Linux'ta hat[1] kullanılır
+    BTN_DPAD_UP    = -1  # Linux uses hat[1]
     BTN_DPAD_DOWN  = -1
 
-# Axis indeksleri - Windows ve Linux farklı mapping kullanır
+# Axis indices - Windows and Linux use different mappings
 if _platform.system() == "Windows":
-    # Windows: pygame DualSense axis sırası
+    # Windows: pygame DualSense axis order
     AXIS_LX = 0
     AXIS_LY = 1
     AXIS_RX = 2
@@ -179,13 +182,21 @@ else:
     AXIS_RY = 4
     AXIS_R2 = 5
 
-# Modlar
-MODE_JOINT = "EKLEM"
+# Mode identifiers (internal). Use MODE_LABELS_TR to render them in Turkish in the GUI.
+MODE_JOINT = "JOINT"
 MODE_TOOL = "TOOL"
+
+# Position identifiers (internal). Use POSITION_LABELS_TR for Turkish display.
+POS_HOME = "HOME"
+POS_SURGERY = "SURGERY"
+
+# Turkish display labels for UI
+MODE_LABELS_TR = {MODE_JOINT: "EKLEM", MODE_TOOL: "TOOL"}
+POSITION_LABELS_TR = {POS_HOME: "HOME", POS_SURGERY: "AMELİYAT"}
 
 
 # =============================================================================
-# JOYSTICK KONTROL SINIFI
+# JOYSTICK CONTROLLER
 # =============================================================================
 
 class JoystickRobotController:
@@ -198,15 +209,15 @@ class JoystickRobotController:
         self.last_jog_start = 0
         self.idle_since = 0
         self.error_state = False
-        self.mode = MODE_JOINT  # Başlangıç modu
-        self.drag_active = False  # Drag modu aktif mi
+        self.mode = MODE_JOINT
+        self.drag_active = False
         self.tool_distance = DEFAULT_TOOL_DISTANCE  # mm
         self.home_joints = None
         self.surgery_joints = None
         self._load_positions()
 
     def _load_positions(self):
-        """Kayıtlı pozisyonları, tool mesafesini ve hızı dosyadan yükle"""
+        """Load saved poses, tool distance and speed from disk."""
         import json
         if os.path.exists(POSITIONS_FILE):
             try:
@@ -219,16 +230,16 @@ class JoystickRobotController:
                 if saved_speed is not None:
                     self.speed = max(SPEED_MIN, min(SPEED_MAX, int(saved_speed)))
                 if self.home_joints:
-                    print(f"[POZ] Home yüklendi: {self.home_joints}")
+                    print(f"[POSE] Home loaded: {self.home_joints}")
                 if self.surgery_joints:
-                    print(f"[POZ] Ameliyat yüklendi: {self.surgery_joints}")
-                print(f"[POZ] Tool mesafesi: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
-                print(f"[POZ] Hız: %{self.speed}")
+                    print(f"[POSE] Surgery loaded: {self.surgery_joints}")
+                print(f"[POSE] Tool distance: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+                print(f"[POSE] Speed: %{self.speed}")
             except Exception as e:
-                print(f"[POZ] Dosya okunamadı: {e}")
+                print(f"[POSE] Failed to read positions file: {e}")
 
     def _save_positions(self):
-        """Pozisyonları, tool mesafesini ve hızı dosyaya kaydet"""
+        """Persist poses, tool distance and speed to disk."""
         import json
         data = {
             "home": self.home_joints,
@@ -240,10 +251,10 @@ class JoystickRobotController:
             with open(POSITIONS_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"[POZ] Dosya yazılamadı: {e}")
+            print(f"[POSE] Failed to write positions file: {e}")
 
     def _read_current_joints(self):
-        """Mevcut eklem açılarını oku, liste olarak döndür"""
+        """Read the current joint angles and return them as a list."""
         import re
         resp = str(self._safe_cmd(self.dashboard.GetAngle))
         match = re.search(r'\{([^}]+)\}', resp)
@@ -252,56 +263,54 @@ class JoystickRobotController:
         return None
 
     def save_home(self):
-        """Mevcut pozisyonu HOME olarak kaydet"""
+        """Save the current pose as HOME."""
         joints = self._read_current_joints()
         if joints:
             self.home_joints = joints
             self._save_positions()
             print(f"\n{'='*50}")
-            print(f"  HOME POZİSYONU KAYDEDİLDİ!")
+            print(f"  HOME POSE SAVED!")
             print(f"  {joints}")
             print(f"{'='*50}\n")
         else:
-            print("[UYARI] Pozisyon okunamadı")
+            print("[WARN] Could not read current pose")
 
     def save_surgery(self):
-        """Mevcut pozisyonu AMELİYAT olarak kaydet"""
+        """Save the current pose as SURGERY."""
         joints = self._read_current_joints()
         if joints:
             self.surgery_joints = joints
             self._save_positions()
             print(f"\n{'='*50}")
-            print(f"  AMELİYAT POZİSYONU KAYDEDİLDİ!")
+            print(f"  SURGERY POSE SAVED!")
             print(f"  {joints}")
             print(f"{'='*50}\n")
         else:
-            print("[UYARI] Pozisyon okunamadı")
+            print("[WARN] Could not read current pose")
 
     def set_tool_distance(self, distance_mm):
-        """Tool mesafesini ayarla ve robota gönder"""
+        """Update the tool distance and push it to the robot."""
         self.tool_distance = int(distance_mm)
         self._save_positions()
         self._apply_tool()
-        print(f"[TOOL] Mesafe: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+        print(f"[TOOL] Distance: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
 
     def _apply_tool(self):
-        """Mevcut tool mesafesini robota uygula"""
+        """Apply the current tool distance to the robot."""
         if not self.dashboard:
             return
         tool_cmd = f"SetTool({TOOL_INDEX},{{0.0,0.0,{float(self.tool_distance)},0.0,0.0,0.0}})"
         self._safe_cmd(self.dashboard.sendRecvMsg, tool_cmd)
         self._safe_cmd(self.dashboard.Tool, TOOL_INDEX)
 
-    pass
-
     def _safe_cmd(self, func, *args):
         if not self.dashboard:
-            print("[UYARI] Robot bağlı değil")
+            print("[WARN] Robot not connected")
             return None
         try:
             return func(*args)
         except (ConnectionError, OSError, BrokenPipeError) as e:
-            print(f"[HATA] Bağlantı koptu: {e}")
+            print(f"[ERROR] Connection lost: {e}")
             self.dashboard = None
             self.active_jog = ""
             return None
@@ -317,30 +326,30 @@ class JoystickRobotController:
     def connect(self):
         try:
             self.dashboard = DobotApiDashboard(self.robot_ip, DASHBOARD_PORT)
-            print(f"[OK] Robot bağlantısı kuruldu: {self.robot_ip}")
+            print(f"[OK] Robot connection established: {self.robot_ip}")
             return True
         except Exception as e:
-            print(f"[HATA] Robot bağlantısı başarısız: {e}")
+            print(f"[ERROR] Robot connection failed: {e}")
             return False
 
     def disconnect(self):
         self._force_stop()
         if self.dashboard:
             self.dashboard.close()
-        print("[OK] Robot bağlantısı kapatıldı")
+        print("[OK] Robot connection closed")
 
     def _force_stop(self):
-        """Koşulsuz durdur"""
+        """Unconditionally stop the active jog."""
         if self.active_jog:
             self._safe_cmd(self.dashboard.MoveJog, "")
             self.active_jog = ""
             self.idle_since = 0
 
     def prepare_robot(self):
-        """Robotu hazırla: hata temizle, enable, hız ayarla, tool tanımla"""
-        print("[HAZIRLIK] Robot hazırlanıyor...")
+        """Prepare the robot: clear errors, enable, set speed, define tool."""
+        print("[PREP] Preparing robot...")
 
-        # Çalışan programı durdur (Mode 7 → Mode 5)
+        # Stop any running program (Mode 7 -> Mode 5)
         self._safe_cmd(self.dashboard.Stop)
         time.sleep(0.5)
 
@@ -350,7 +359,7 @@ class JoystickRobotController:
         time.sleep(0.3)
 
         resp = self._safe_cmd(self.dashboard.EnableRobot)
-        print(f"[HAZIRLIK] EnableRobot: {resp}")
+        print(f"[PREP] EnableRobot: {resp}")
         time.sleep(1)
 
         self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
@@ -360,14 +369,13 @@ class JoystickRobotController:
         self._safe_cmd(self.dashboard.AccL, JOG_ACC_LINEAR)
         time.sleep(0.3)
 
-        # Tool tanımla
         self._apply_tool()
         time.sleep(0.3)
 
-        # Mod 5 (Idle/hazır) olana kadar bekle — en fazla 3 deneme
+        # Wait until Mode 5 (Idle/ready), up to 3 attempts
         ready = False
         for attempt in range(3):
-            for _ in range(10):  # 5 saniye bekle (10 x 0.5)
+            for _ in range(10):  # 5 s wait (10 x 0.5)
                 mode_resp = str(self._safe_cmd(self.dashboard.RobotMode))
                 if ",{5}," in mode_resp:
                     ready = True
@@ -375,8 +383,8 @@ class JoystickRobotController:
                 time.sleep(0.5)
             if ready:
                 break
-            # Hâlâ Mode 5 değil → ClearError + EnableRobot tekrar
-            print(f"[HAZIRLIK] Mod 5'e geçmedi (deneme {attempt+1}), hata temizleniyor...")
+            # Still not Mode 5 -> clear errors + re-enable
+            print(f"[PREP] Did not reach Mode 5 (attempt {attempt+1}), clearing errors...")
             self._safe_cmd(self.dashboard.ClearError)
             time.sleep(0.5)
             self._safe_cmd(self.dashboard.EnableRobot)
@@ -384,24 +392,24 @@ class JoystickRobotController:
 
         mode = self._safe_cmd(self.dashboard.RobotMode)
         errors = self._safe_cmd(self.dashboard.GetErrorID)
-        print(f"[HAZIRLIK] Mode: {mode} | Errors: {errors}")
+        print(f"[PREP] Mode: {mode} | Errors: {errors}")
 
         self.error_state = False
         self.active_jog = ""
-        print(f"[HAZIRLIK] Hız: %{self.speed} | Tool: {TOOL_INDEX}")
+        print(f"[PREP] Speed: %{self.speed} | Tool: {TOOL_INDEX}")
         if ready:
-            print("[HAZIRLIK] Robot hazır! (Mode 5 = Idle)")
+            print("[PREP] Robot ready! (Mode 5 = Idle)")
         else:
-            print("[UYARI] Robot Mode 5'e geçmedi. Fiziksel acil durdur butonuna veya"
-                  " tablet kontrolde hata varsa temizle; bu mesajdan sonra tekrar dene.")
+            print("[WARN] Robot did not reach Mode 5. Check the physical E-stop or clear "
+                  "any errors on the teach pendant, then retry.")
 
     def recover_from_error(self):
-        print("[KURTARMA] Hata tespit edildi, kurtarılıyor...")
+        print("[RECOVER] Error detected, recovering...")
         self.active_jog = ""
         self.prepare_robot()
 
     def toggle_mode(self):
-        """Eklem ↔ Tool modu geçişi"""
+        """Switch between Joint and Tool modes."""
         self._force_stop()
         time.sleep(0.1)
 
@@ -411,17 +419,17 @@ class JoystickRobotController:
             self.mode = MODE_JOINT
 
         print(f"\n{'='*50}")
-        print(f"  MOD DEĞİŞTİ → [{self.mode}]")
+        print(f"  MODE SWITCHED -> [{self.mode}]")
         if self.mode == MODE_TOOL:
-            print("  Sol Analog : X/Y hareket")
-            print("  Sağ Analog : Z hareket + Rz dönüş")
-            print("  L2/R2      : Rx dönüş")
-            print("  D-Pad      : Ry dönüş")
+            print("  Left stick  : X/Y translation")
+            print("  Right stick : Z translation + Rz rotation")
+            print("  L2/R2       : Rx rotation")
+            print("  D-Pad       : Ry rotation")
         else:
-            print("  Sol Analog : J1/J2")
-            print("  Sağ Analog : J3/J4")
-            print("  L2/R2      : J5")
-            print("  D-Pad      : J6")
+            print("  Left stick  : J1/J2")
+            print("  Right stick : J3/J4")
+            print("  L2/R2       : J5")
+            print("  D-Pad       : J6")
         print(f"{'='*50}\n")
 
     def enable_robot(self):
@@ -436,55 +444,55 @@ class JoystickRobotController:
         self.prepare_robot()
 
     def toggle_drag(self):
-        """Drag modu aç/kapat. Kapanınca mevcut pozisyondan +5cm tool ayarla."""
+        """Toggle drag mode. On exit, apply the tool offset from the current pose."""
         import re
 
         if not self.drag_active:
-            # DRAG BAŞLAT
+            # START DRAG
             self._force_stop()
             time.sleep(0.1)
             resp = self._safe_cmd(self.dashboard.StartDrag)
             print(f"\n{'='*50}")
-            print(f"  DRAG MODU AKTİF - Robotu elle sürükle!")
-            print(f"  Bitince tekrar O (Daire) butonuna bas.")
+            print(f"  DRAG MODE ACTIVE - drag the robot by hand!")
+            print(f"  Press Circle again when done.")
             print(f"  StartDrag: {resp}")
             print(f"{'='*50}\n")
             self.drag_active = True
         else:
-            # DRAG DURDUR + TOOL AYARLA
+            # STOP DRAG + APPLY TOOL
             resp = self._safe_cmd(self.dashboard.StopDrag)
             print(f"[DRAG] StopDrag: {resp}")
             self.drag_active = False
             time.sleep(0.5)
 
-            # Enable robot (drag sonrası disable oluyor)
+            # Re-enable the robot (drag disables it)
             self._safe_cmd(self.dashboard.EnableRobot)
             time.sleep(1)
 
-            # Mevcut pozisyonu oku
+            # Read current pose
             pose_resp = str(self._safe_cmd(self.dashboard.GetPose))
             match = re.search(r'\{([^}]+)\}', pose_resp)
 
             if match:
                 pose = [float(x) for x in match.group(1).split(',')]
-                print(f"[DRAG] Bırakılan pozisyon: X={pose[0]:.1f} Y={pose[1]:.1f} Z={pose[2]:.1f}")
+                print(f"[DRAG] Released pose: X={pose[0]:.1f} Y={pose[1]:.1f} Z={pose[2]:.1f}")
                 print(f"       Rx={pose[3]:.1f} Ry={pose[4]:.1f} Rz={pose[5]:.1f}")
 
-                # Tool ofseti uygula
+                # Apply tool offset
                 self._apply_tool()
 
                 print(f"\n{'='*50}")
-                print(f"  TOOL AYARLANDI!")
-                print(f"  Flanştan {self.tool_distance}mm ileride ({self.tool_distance/10:.0f}cm)")
-                print(f"  Tool modu aktif - joystick bu nokta etrafında döner")
+                print(f"  TOOL APPLIED!")
+                print(f"  {self.tool_distance}mm ({self.tool_distance/10:.0f}cm) ahead of the flange")
+                print(f"  Tool mode active - joystick now rotates around this point")
                 print(f"{'='*50}\n")
 
-                # Otomatik tool moduna geç
+                # Auto switch to Tool mode
                 self.mode = MODE_TOOL
             else:
-                print(f"[DRAG] Pozisyon okunamadı: {pose_resp}")
+                print(f"[DRAG] Could not read pose: {pose_resp}")
 
-            # Hız/ivme ayarlarını geri yükle
+            # Restore speed/acceleration settings
             self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
             self._safe_cmd(self.dashboard.VelJ, JOG_VEL_JOINT)
             self._safe_cmd(self.dashboard.AccJ, JOG_ACC_JOINT)
@@ -496,45 +504,44 @@ class JoystickRobotController:
         self.speed = new_speed
         if self.dashboard:
             resp = self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
-            print(f"[HIZ] %{self.speed}  ({resp})")
+            print(f"[SPEED] %{self.speed}  ({resp})")
         else:
-            print(f"[HIZ] %{self.speed}")
+            print(f"[SPEED] %{self.speed}")
         self._save_positions()
 
     def print_current_position(self):
-        """Mevcut pozisyonu terminale yazdır (kopyala-yapıştır için)"""
+        """Print the current pose to stdout (handy for copy/paste)."""
         import re
         angle_resp = str(self._safe_cmd(self.dashboard.GetAngle))
         pose_resp = str(self._safe_cmd(self.dashboard.GetPose))
 
-        # {değer1,değer2,...} formatını yakala
         match = re.search(r'\{([^}]+)\}', angle_resp)
         if match:
             nums = [float(x) for x in match.group(1).split(',')]
             if len(nums) >= 6:
                 print(f"\n{'='*50}")
-                print(f"  MEVCUT POZİSYON")
-                print(f"  Eklemler: [{nums[0]}, {nums[1]}, {nums[2]}, {nums[3]}, {nums[4]}, {nums[5]}]")
-                print(f"  Pose: {pose_resp}")
-                print(f"  Kopyala → HOME_JOINTS veya SURGERY_JOINTS olarak yapıştır")
+                print(f"  CURRENT POSE")
+                print(f"  Joints: [{nums[0]}, {nums[1]}, {nums[2]}, {nums[3]}, {nums[4]}, {nums[5]}]")
+                print(f"  Pose:   {pose_resp}")
+                print(f"  Copy and paste as HOME_JOINTS or SURGERY_JOINTS")
                 print(f"{'='*50}\n")
                 return
-        print(f"[UYARI] Pozisyon okunamadı: {angle_resp}")
+        print(f"[WARN] Could not read pose: {angle_resp}")
 
     def go_to_position(self, joints, name):
-        """MovJ ile sabit pozisyona git"""
+        """Use MovJ to move to a preset pose."""
         if joints is None:
-            print(f"[UYARI] {name} pozisyonu tanımlı değil! Önce kaydet.")
+            print(f"[WARN] {name} pose is not defined! Save it first.")
             return
 
         if not self.dashboard:
-            print(f"[UYARI] Robot bağlı değil!")
+            print(f"[WARN] Robot not connected!")
             return
 
         self._force_stop()
         time.sleep(0.1)
 
-        # Çalışan programı durdur + hata temizle (Mode 7 sorunu)
+        # Stop running program + clear errors (Mode 7 workaround)
         self._safe_cmd(self.dashboard.Stop)
         time.sleep(0.3)
         self._safe_cmd(self.dashboard.ClearError)
@@ -542,55 +549,54 @@ class JoystickRobotController:
         self._safe_cmd(self.dashboard.EnableRobot)
         time.sleep(0.5)
 
-        # Hız ayarla
+        # Set speed
         self._safe_cmd(self.dashboard.SpeedFactor, MOVJ_SPEED)
-        print(f"[GİT] {name} pozisyonuna gidiliyor (hız: %{MOVJ_SPEED})...")
-        print(f"  Hedef: {joints}")
+        print(f"[MOVE] Going to {name} pose (speed: %{MOVJ_SPEED})...")
+        print(f"  Target: {joints}")
 
-        # MovJ ile eklem koordinatlarına git (coordinateMode=1 = joint)
+        # MovJ in joint coordinates (coordinateMode=1 = joint)
         resp = self._safe_cmd(
             self.dashboard.MovJ,
             joints[0], joints[1], joints[2],
             joints[3], joints[4], joints[5], 1
         )
         err = self._parse_error_code(resp)
-        print(f"[GİT] MovJ: {resp}")
+        print(f"[MOVE] MovJ: {resp}")
 
         if err == 0:
-            # Hareket tamamlanana kadar bekle
-            print(f"[GİT] Hareket devam ediyor...")
+            print(f"[MOVE] Motion in progress...")
             time.sleep(1)
-            # RobotMode 5'e dönene kadar bekle (hareket bitti)
-            for _ in range(30):  # max 15 saniye
+            # Wait for RobotMode 5 (motion complete); up to 15 s
+            for _ in range(30):
                 mode_resp = str(self._safe_cmd(self.dashboard.RobotMode))
                 if ",{5}," in mode_resp:
                     break
                 time.sleep(0.5)
 
-            print(f"[GİT] {name} pozisyonuna ulaşıldı!")
+            print(f"[MOVE] Reached {name} pose!")
 
-            # Ameliyat pozisyonuna geldiyse otomatik Tool moduna geç
-            if name == "AMELİYAT":
+            # Auto switch modes based on the target pose
+            if name == POS_SURGERY:
                 self.mode = MODE_TOOL
                 print(f"\n{'='*50}")
-                print(f"  TOOL MODUNA GEÇİLDİ (ameliyat pozisyonu)")
-                print(f"  Sol Analog : X/Y hareket")
-                print(f"  Sağ Analog : Z hareket + Rz dönüş")
-                print(f"  L2/R2      : Rx dönüş")
-                print(f"  D-Pad      : Ry dönüş")
+                print(f"  SWITCHED TO TOOL MODE (surgery pose)")
+                print(f"  Left stick  : X/Y translation")
+                print(f"  Right stick : Z translation + Rz rotation")
+                print(f"  L2/R2       : Rx rotation")
+                print(f"  D-Pad       : Ry rotation")
                 print(f"{'='*50}\n")
-            elif name == "HOME":
+            elif name == POS_HOME:
                 self.mode = MODE_JOINT
-                print(f"  Eklem moduna geçildi.")
+                print(f"  Switched to Joint mode.")
 
-            # Hızı eski haline getir
+            # Restore previous speed
             self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
         else:
-            print(f"[GİT] HATA! MovJ başarısız: {err}")
+            print(f"[MOVE] ERROR! MovJ failed: {err}")
             self._safe_cmd(self.dashboard.SpeedFactor, self.speed)
 
     def start_jog(self, axis_id):
-        """Jog hareketini başlat (moda göre farklı parametre)"""
+        """Start a jog motion (parameters differ per mode)."""
         self.idle_since = 0
 
         if axis_id == self.active_jog:
@@ -612,12 +618,12 @@ class JoystickRobotController:
         self.last_jog_start = now
 
         if self.mode == MODE_JOINT:
-            # Eklem modu: coordtype yok
+            # Joint mode: no coordtype
             resp = self._safe_cmd(self.dashboard.MoveJog, axis_id)
         else:
-            # Tool modu:
-            # Dönüş (Rx/Ry/Rz) → coordtype=1 (user) → TCP noktası sabit, flanş etrafında döner
-            # Kaydırma (X/Y/Z) → coordtype=2 (tool) → tool eksenlerinde hareket
+            # Tool mode:
+            # Rotations (Rx/Ry/Rz) -> coordtype=1 (user) -> TCP fixed, flange rotates
+            # Translations (X/Y/Z) -> coordtype=2 (tool) -> move along tool axes
             if axis_id.startswith("R"):
                 resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 1, -1, TOOL_INDEX)
             else:
@@ -627,11 +633,11 @@ class JoystickRobotController:
         print(f"[{self.mode}] MoveJog({axis_id}) -> {resp}")
 
         if err == -1:
-            # -1 = komut reddedildi (meşgul/geçiş sırasında) - tekrar denenecek
+            # -1 = command rejected (busy/in transition) - will retry
             self.active_jog = ""
         elif err != 0 and err != -2:
-            # Ciddi hata - kurtarma gerekli
-            print(f"[{self.mode}] Ciddi hata: {err}")
+            # Serious error - recovery needed
+            print(f"[{self.mode}] Serious error: {err}")
             self.active_jog = ""
             self.error_state = True
 
@@ -661,7 +667,7 @@ class JoystickRobotController:
         pygame.joystick.init()
 
         if pygame.joystick.get_count() == 0:
-            print("[HATA] Joystick bulunamadı!")
+            print("[ERROR] No joystick detected!")
             return
 
         js = pygame.joystick.Joystick(0)
@@ -677,35 +683,36 @@ class JoystickRobotController:
         self.running = True
         loop_delay = 1.0 / LOOP_HZ
 
-        home_str = "TANIMLI" if HOME_JOINTS else "YOK"
-        surg_str = "TANIMLI" if SURGERY_JOINTS else "YOK"
+        home_str = "SET" if self.home_joints else "UNSET"
+        surg_str = "SET" if self.surgery_joints else "UNSET"
 
         print("\n" + "=" * 50)
-        print(f"  JOYSTICK KONTROL AKTİF [{self.mode} MODU]")
-        print(f"  Home: {home_str} | Ameliyat: {surg_str}")
+        print(f"  JOYSTICK CONTROL ACTIVE [{self.mode} MODE]")
+        print(f"  Home: {home_str} | Surgery: {surg_str}")
         print("=" * 50)
-        print("  ---  POZİSYON  ---")
-        print("  D-Pad Sol    : HOME pozisyonuna git")
-        print("  D-Pad Sağ    : AMELİYAT pozisyonuna git")
-        print("  L3           : Mevcut pozisyonu yazdır")
-        print("  ---  EKLEM MODU  ---")
-        print("  Sol Analog   : J1 / J2")
-        print("  Sağ Analog   : J3 / J4")
+        print("  ---  POSITION  ---")
+        print("  D-Pad Left   : Go to HOME pose")
+        print("  D-Pad Right  : Go to SURGERY pose")
+        print("  L3           : Save current pose as Home")
+        print("  R3           : Save current pose as Surgery")
+        print("  ---  JOINT MODE  ---")
+        print("  Left stick   : J1 / J2")
+        print("  Right stick  : J3 / J4")
         print("  L2/R2        : J5")
         print("  D-Pad Y      : J6")
-        print("  ---  TOOL MODU  ---")
-        print("  Sol Analog   : X / Y hareket")
-        print("  Sağ Analog   : Z hareket / Rz dönüş")
-        print("  L2/R2        : Rx dönüş")
-        print("  D-Pad Y      : Ry dönüş")
-        print("  ---  BUTONLAR  ---")
-        print("  SHARE        : Mod değiştir (Eklem ↔ Tool)")
-        print("  Üçgen/X      : Hız artır/azalt")
-        print("  Kare         : Durdur")
-        print("  R1           : Enable + Hazırla")
+        print("  ---  TOOL MODE  ---")
+        print("  Left stick   : X / Y translation")
+        print("  Right stick  : Z translation / Rz rotation")
+        print("  L2/R2        : Rx rotation")
+        print("  D-Pad Y      : Ry rotation")
+        print("  ---  BUTTONS  ---")
+        print("  SHARE        : Switch mode (Joint <-> Tool)")
+        print("  Triangle/X   : Speed up/down")
+        print("  Square       : Stop")
+        print("  R1           : Enable + Prepare")
         print("  L1           : Disable")
-        print("  Options      : Çıkış")
-        print("  PS           : ACİL DURDURMA")
+        print("  Options      : Quit")
+        print("  PS           : EMERGENCY STOP")
         print("=" * 50 + "\n")
 
         try:
@@ -725,20 +732,20 @@ class JoystickRobotController:
                 time.sleep(loop_delay)
 
         except KeyboardInterrupt:
-            print("\n[!] Ctrl+C - Durduruluyor...")
+            print("\n[!] Ctrl+C - shutting down...")
         finally:
             self._force_stop()
             self.disconnect()
             js.quit()
             pygame.quit()
-            print("[OK] Program sonlandırıldı")
+            print("[OK] Program terminated")
 
     def _handle_button(self, button):
         _BTN_NAMES = {}
-        # Sadece GEÇERLİ (negatif olmayan) sabitleri isim tablosuna ekle
+        # Only add valid (non-negative) constants to the label table
         for _btn, _lbl in (
-            (BTN_CROSS, "× Cross"), (BTN_CIRCLE, "○ Circle"),
-            (BTN_SQUARE, "□ Square"), (BTN_TRIANGLE, "△ Triangle"),
+            (BTN_CROSS, "x Cross"), (BTN_CIRCLE, "o Circle"),
+            (BTN_SQUARE, "Square"), (BTN_TRIANGLE, "Triangle"),
             (BTN_L1, "L1"), (BTN_R1, "R1"),
             (BTN_L2, "L2"), (BTN_R2, "R2"),
             (BTN_SHARE, "SHARE"), (BTN_OPTIONS, "OPTIONS"),
@@ -747,68 +754,68 @@ class JoystickRobotController:
         ):
             if _btn >= 0 and _btn not in _BTN_NAMES:
                 _BTN_NAMES[_btn] = f"{_lbl}(B{_btn})"
-        name = _BTN_NAMES.get(button, f"B{button}(atanmamış)")
+        name = _BTN_NAMES.get(button, f"B{button}(unassigned)")
 
-        # Her eşleşme için butonun geçerli (>=0) olduğunu da kontrol et
+        # Verify each target button is valid (>=0) before comparing
         def _is(target):
             return target >= 0 and button == target
 
         if _is(BTN_SQUARE):
-            print(f"[BUTON] {name} → ACİL STOP (Robot Disable)")
+            print(f"[BTN] {name} -> EMERGENCY STOP (Robot Disable)")
             self.disable_robot()
         elif _is(BTN_L1):
-            print(f"[BUTON] {name} → Robot Disable (Linux: L1)")
+            print(f"[BTN] {name} -> Robot Disable (Linux: L1)")
             self.disable_robot()
         elif _is(BTN_R1):
-            print(f"[BUTON] {name} → Robot Enable (Linux: R1)")
+            print(f"[BTN] {name} -> Robot Enable (Linux: R1)")
             self.enable_robot()
         elif _is(BTN_OPTIONS):
-            print(f"[BUTON] {name} → Durdur (MoveJog stop)")
+            print(f"[BTN] {name} -> Stop (MoveJog stop)")
             self._force_stop()
         elif _is(BTN_L3):
-            print(f"[BUTON] {name} → Home pozisyonu KAYDET")
+            print(f"[BTN] {name} -> Save Home pose")
             self.save_home()
         elif _is(BTN_R3):
-            print(f"[BUTON] {name} → Ameliyat pozisyonu KAYDET")
+            print(f"[BTN] {name} -> Save Surgery pose")
             self.save_surgery()
         elif _is(BTN_SHARE):
-            print(f"[BUTON] {name} → Mod değiştir (Eklem ↔ Tool)")
+            print(f"[BTN] {name} -> Switch mode (Joint <-> Tool)")
             self.toggle_mode()
         elif _is(BTN_HOME_GO):
-            print(f"[BUTON] {name} → HOME pozisyonuna git")
-            self.go_to_position(self.home_joints, "HOME")
+            print(f"[BTN] {name} -> Go to HOME pose")
+            self.go_to_position(self.home_joints, POS_HOME)
         elif _is(BTN_SURGERY_GO):
-            print(f"[BUTON] {name} → AMELİYAT pozisyonuna git")
-            self.go_to_position(self.surgery_joints, "AMELİYAT")
+            print(f"[BTN] {name} -> Go to SURGERY pose")
+            self.go_to_position(self.surgery_joints, POS_SURGERY)
         elif _is(BTN_TRIANGLE):
-            print(f"[BUTON] {name} → Hız artır (%{self.speed} → %{min(self.speed+SPEED_STEP, SPEED_MAX)})")
+            print(f"[BTN] {name} -> Speed up (%{self.speed} -> %{min(self.speed+SPEED_STEP, SPEED_MAX)})")
             self.set_speed(self.speed + SPEED_STEP)
         elif _is(BTN_CROSS):
-            print(f"[BUTON] {name} → Hız azalt (%{self.speed} → %{max(self.speed-SPEED_STEP, SPEED_MIN)})")
+            print(f"[BTN] {name} -> Speed down (%{self.speed} -> %{max(self.speed-SPEED_STEP, SPEED_MIN)})")
             self.set_speed(self.speed - SPEED_STEP)
         elif _is(BTN_CIRCLE):
-            print(f"[BUTON] {name} → Drag modu")
+            print(f"[BTN] {name} -> Drag mode")
             self.toggle_drag()
         elif _is(BTN_PS):
-            print(f"[BUTON] {name} → (devre dışı)")
+            print(f"[BTN] {name} -> (disabled)")
         elif _is(BTN_DPAD_UP) or _is(BTN_DPAD_DOWN):
-            # D-Pad Y, _handle_axes içinde sürekli okunur - ekstra log yok
+            # D-Pad Y is polled continuously inside _handle_axes; no extra log
             pass
         else:
-            print(f"[BUTON] B{button} → (atanmamış)")
+            print(f"[BTN] B{button} -> (unassigned)")
 
     def _handle_dpad(self, value):
-        """D-Pad olaylarını işle: sol/sağ=pozisyon git, yukarı/aşağı=jog"""
+        """Handle D-Pad events: left/right -> go to pose."""
         hat_x, hat_y = value
         if hat_x == -1:
-            print("[D-PAD] ◄ Sol → HOME pozisyonuna git")
-            self.go_to_position(self.home_joints, "HOME")
+            print("[D-PAD] Left -> Go to HOME pose")
+            self.go_to_position(self.home_joints, POS_HOME)
         elif hat_x == 1:
-            print("[D-PAD] ► Sağ → AMELİYAT pozisyonuna git")
-            self.go_to_position(self.surgery_joints, "AMELİYAT")
+            print("[D-PAD] Right -> Go to SURGERY pose")
+            self.go_to_position(self.surgery_joints, POS_SURGERY)
 
     def _handle_axes(self, js):
-        # Drag modundayken joystick jog gönderme
+        # Do not send jog commands while drag mode is active
         if self.drag_active:
             return
 
@@ -820,8 +827,8 @@ class JoystickRobotController:
         r2 = js.get_axis(AXIS_R2)
         hat = js.get_hat(0) if js.get_numhats() > 0 else (0, 0)
 
-        # D-Pad Y (yukarı/aşağı) — platformdan bağımsız sentetik değer:
-        # Linux'ta hat[1] gelir, Windows'ta buton (11/12) gelir.
+        # Platform-agnostic D-Pad Y synthesis:
+        # Linux delivers hat[1]; Windows uses buttons 11/12.
         dpad_y = hat[1]
         if BTN_DPAD_UP >= 0 and js.get_button(BTN_DPAD_UP):
             dpad_y = 1
@@ -831,7 +838,7 @@ class JoystickRobotController:
         candidates = []
 
         if self.mode == MODE_JOINT:
-            # --- EKLEM MODU ---
+            # --- JOINT MODE ---
             if abs(ly) > DEADZONE:
                 candidates.append(("J1", abs(ly), "J1-" if ly > 0 else "J1+"))
             if abs(lx) > DEADZONE:
@@ -848,27 +855,27 @@ class JoystickRobotController:
             if r2_val > 0.3:
                 candidates.append(("J5-", r2_val, "J5-"))
 
-            # D-Pad yukarı/aşağı → J6 (sol/sağ artık pozisyon gitme)
+            # D-Pad up/down -> J6 (left/right reserved for pose recall)
             if dpad_y != 0:
                 candidates.append(("J6", 1.0, "J6+" if dpad_y > 0 else "J6-"))
 
         else:
-            # --- TOOL MODU ---
-            # Sol analog: X/Y kaydırma (tool eksenleri)
+            # --- TOOL MODE ---
+            # Left stick: X/Y translation along tool axes
             if abs(ly) > DEADZONE:
                 candidates.append(("X", abs(ly), "X-" if ly > 0 else "X+"))
             if abs(lx) > DEADZONE:
                 candidates.append(("Y", abs(lx), "Y+" if lx > 0 else "Y-"))
 
-            # Sağ analog Y: Z yukarı/aşağı (kaydırma)
+            # Right stick Y: Z translation up/down
             if abs(ry) > DEADZONE:
                 candidates.append(("Z", abs(ry), "Z-" if ry > 0 else "Z+"))
 
-            # Sağ analog X: Ry dönüş = kafa sola/sağa (tool noktası sabit)
+            # Right stick X: Ry rotation = head turn (TCP stays fixed)
             if abs(rx) > DEADZONE:
                 candidates.append(("Ry", abs(rx), "Ry+" if rx > 0 else "Ry-"))
 
-            # L2/R2: Rx dönüş = kafa yukarı/aşağı (tool noktası sabit)
+            # L2/R2: Rx rotation = head up/down (TCP stays fixed)
             l2_val = (l2 + 1) / 2
             r2_val = (r2 + 1) / 2
             if l2_val > 0.3:
@@ -876,7 +883,7 @@ class JoystickRobotController:
             if r2_val > 0.3:
                 candidates.append(("Rx+", r2_val, "Rx+"))
 
-            # D-Pad Y: Rz dönüş = kafa yatırma
+            # D-Pad Y: Rz rotation = head tilt
             if dpad_y != 0:
                 candidates.append(("Rz", 1.0, "Rz+" if dpad_y > 0 else "Rz-"))
 
@@ -888,13 +895,13 @@ class JoystickRobotController:
 
 
 # =============================================================================
-# BAŞLATMA
+# ENTRY POINT
 # =============================================================================
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  Dobot Nova 5 - PS5 Joystick Kontrol")
-    print("  Çift Mod: Eklem (J1-J6) + Tool (XYZ/Rotation)")
+    print("  Dobot Nova 5 - PS5 Joystick Controller")
+    print("  Dual mode: Joint (J1-J6) + Tool (XYZ/rotation)")
     print("=" * 50)
 
     controller = JoystickRobotController(ROBOT_IP)

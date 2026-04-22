@@ -1,8 +1,22 @@
+import json
+import os
 import socket
 import time
 
-ROBOT_IP = "192.168.5.1"
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+
+
+def _load_robot_ip():
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            return json.load(f).get("robot_ip", "192.168.5.1")
+    except (OSError, json.JSONDecodeError):
+        return "192.168.5.1"
+
+
+ROBOT_IP = _load_robot_ip()
 DASHBOARD_PORT = 29999
+
 
 def send_command(sock, cmd):
     sock.send(f"{cmd}\n".encode())
@@ -10,8 +24,9 @@ def send_command(sock, cmd):
     response = sock.recv(4096).decode(errors="ignore")
     return response.strip()
 
+
 def main():
-    print(f"Dobot Nova 5 bağlantı testi - {ROBOT_IP}:{DASHBOARD_PORT}")
+    print(f"Dobot Nova 5 connection test - {ROBOT_IP}:{DASHBOARD_PORT}")
     print("-" * 50)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -19,22 +34,23 @@ def main():
 
     try:
         sock.connect((ROBOT_IP, DASHBOARD_PORT))
-        print("Bağlantı başarılı!")
+        print("Connection successful!")
 
-        # Robot durumunu sorgula
+        # Query robot status
         print(f"\nRobotMode: {send_command(sock, 'RobotMode()')}")
-        print(f"GetPose: {send_command(sock, 'GetPose()')}")
-        print(f"GetAngle: {send_command(sock, 'GetAngle()')}")
+        print(f"GetPose:   {send_command(sock, 'GetPose()')}")
+        print(f"GetAngle:  {send_command(sock, 'GetAngle()')}")
 
     except socket.timeout:
-        print("HATA: Bağlantı zaman aşımı!")
+        print("ERROR: Connection timed out!")
     except ConnectionRefusedError:
-        print("HATA: Bağlantı reddedildi! TCP/IP Remote Control aktif mi?")
+        print("ERROR: Connection refused! Is TCP/IP Remote Control enabled?")
     except Exception as e:
-        print(f"HATA: {e}")
+        print(f"ERROR: {e}")
     finally:
         sock.close()
-        print("\nBağlantı kapatıldı.")
+        print("\nConnection closed.")
+
 
 if __name__ == "__main__":
     main()
