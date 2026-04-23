@@ -211,6 +211,119 @@ class SignalBridge(QObject):
     status_update = pyqtSignal(dict)
 
 
+class ToolOffsetDialog(QDialog):
+    """6-DOF tool koordinat sistemi ayar popup'ı: X, Y, Z, Rx, Ry, Rz"""
+
+    SLIDER_CONFIGS = [
+        # (isim, min, max, birim)
+        ("X",  -1000, 1000, "mm"),
+        ("Y",  -1000, 1000, "mm"),
+        ("Z",  -1000, 1000, "mm"),
+        ("Rx", -1000, 1000, "°"),
+        ("Ry", -1000, 1000, "°"),
+        ("Rz", -1000, 1000, "°"),
+    ]
+
+    def __init__(self, parent, controller, apply_callback):
+        super().__init__(parent)
+        self.controller = controller
+        self.apply_callback = apply_callback
+        self.setWindowTitle("Tool Koordinat Sistemi Ayarı")
+        self.setMinimumWidth(520)
+        self.setStyleSheet("QDialog { background-color: #1e1e2e; }")
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("6-DOF Tool Offset (flanş → TCP)")
+        title.setFont(QFont("Arial", 13, QFont.Bold))
+        title.setStyleSheet("color: #cba6f7; padding: 6px;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        info = QLabel("Negatif değerler de girilebilir. SET → robota gönderilir ve kaydedilir.")
+        info.setStyleSheet("color: #a6adc8; padding: 4px;")
+        info.setAlignment(Qt.AlignCenter)
+        layout.addWidget(info)
+
+        self.sliders = {}
+        self.value_labels = {}
+
+        initial = list(controller.tool_offset)
+
+        for idx, (name, mn, mx, unit) in enumerate(self.SLIDER_CONFIGS):
+            row = QHBoxLayout()
+
+            lbl = QLabel(f"{name}:")
+            lbl.setFixedWidth(45)
+            lbl.setStyleSheet("color: #cdd6f4; font-size: 14px; font-weight: bold;")
+            row.addWidget(lbl)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(mn, mx)
+            slider.setValue(int(round(initial[idx])))
+            slider.setTickInterval(max(1, (mx - mn) // 10))
+            slider.setStyleSheet("""
+                QSlider::groove:horizontal { background: #313244; height: 8px; border-radius: 4px; }
+                QSlider::handle:horizontal { background: #cba6f7; width: 18px; margin: -5px 0; border-radius: 9px; }
+                QSlider::sub-page:horizontal { background: #cba6f7; border-radius: 4px; }
+            """)
+
+            val_lbl = QLabel(f"{int(round(initial[idx]))} {unit}")
+            val_lbl.setFixedWidth(85)
+            val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val_lbl.setStyleSheet("color: #cba6f7; font-size: 13px; font-weight: bold;")
+
+            slider.valueChanged.connect(
+                lambda v, lab=val_lbl, u=unit: lab.setText(f"{v} {u}")
+            )
+
+            row.addWidget(slider)
+            row.addWidget(val_lbl)
+            layout.addLayout(row)
+
+            self.sliders[name] = slider
+            self.value_labels[name] = val_lbl
+
+        # Butonlar
+        btn_row = QHBoxLayout()
+
+        btn_reset = QPushButton("SIFIRLA")
+        btn_reset.setStyleSheet("""
+            QPushButton { background-color: #6c7086; color: white; font-size: 12px; padding: 10px; }
+            QPushButton:hover { background-color: #808080; }
+        """)
+        btn_reset.clicked.connect(self._reset_all)
+        btn_row.addWidget(btn_reset)
+
+        btn_cancel = QPushButton("İPTAL")
+        btn_cancel.setStyleSheet("""
+            QPushButton { background-color: #45475a; color: white; font-size: 13px; padding: 10px; }
+            QPushButton:hover { background-color: #585b70; }
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_set = QPushButton("SET")
+        btn_set.setStyleSheet("""
+            QPushButton { background-color: #40a02b; color: white; font-size: 14px;
+                          padding: 10px; font-weight: bold; }
+            QPushButton:hover { background-color: #50c030; }
+        """)
+        btn_set.clicked.connect(self._apply)
+        btn_row.addWidget(btn_set)
+
+        layout.addLayout(btn_row)
+
+    def _reset_all(self):
+        for name, _, _, _ in self.SLIDER_CONFIGS:
+            self.sliders[name].setValue(0)
+
+    def _apply(self):
+        vals = [self.sliders[n].value() for n, _, _, _ in self.SLIDER_CONFIGS]
+        self.apply_callback(*vals)
+        self.accept()
+
+
 class RobotGUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -228,6 +341,17 @@ class RobotGUI(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._poll_status)
         self.status_timer.start(500)
+
+        # Uygulama açılır açılmaz robota bağlan ve tool offset'i robota bas.
+        # Böylece kullanıcı Enable'a basmadan önce bile tool senkron olur.
+        threading.Thread(target=self._auto_connect, daemon=True).start()
+
+    def _auto_connect(self):
+        print("[BAĞLAN] Robot ile otomatik bağlantı kuruluyor...")
+        if self.controller.connect():
+            print("[BAĞLAN] Robot bağlı, tool offset uygulandı.")
+        else:
+            print("[BAĞLAN] Bağlantı başarısız — 'JOYSTICK KONTROLÜNÜ BAŞLAT' ile tekrar denenecek.")
 
     def _init_ui(self):
         self.setWindowTitle("Dobot Nova 5 — Diş Hekimliği Robot Kontrolü")
@@ -331,33 +455,25 @@ class RobotGUI(QMainWindow):
 
         top_row.addWidget(speed_group)
 
-        # Tool mesafesi
-        tool_group = QGroupBox("Tool Mesafesi (TCP)")
+        # Tool koordinat sistemi
+        tool_group = QGroupBox("Tool Koordinat Sistemi (TCP)")
         tool_layout = QVBoxLayout(tool_group)
 
-        self.lbl_tool_dist = QLabel(f"{self.controller.tool_distance}mm")
-        self.lbl_tool_dist.setFont(QFont("Arial", 18, QFont.Bold))
-        self.lbl_tool_dist.setAlignment(Qt.AlignCenter)
-        self.lbl_tool_dist.setStyleSheet("color: #cba6f7;")
-        tool_layout.addWidget(self.lbl_tool_dist)
+        self.lbl_tool_summary = QLabel(self._format_tool_summary(self.controller.tool_offset))
+        self.lbl_tool_summary.setFont(QFont("monospace", 11, QFont.Bold))
+        self.lbl_tool_summary.setAlignment(Qt.AlignCenter)
+        self.lbl_tool_summary.setStyleSheet("color: #cba6f7; padding: 6px;")
+        self.lbl_tool_summary.setWordWrap(True)
+        tool_layout.addWidget(self.lbl_tool_summary)
 
-        self.slider_tool = QSlider(Qt.Horizontal)
-        self.slider_tool.setRange(10, 500)  # 1cm - 50cm
-        self.slider_tool.setValue(self.controller.tool_distance)
-        self.slider_tool.setTickInterval(50)
-        self.slider_tool.setStyleSheet("""
-            QSlider::groove:horizontal { background: #313244; height: 8px; border-radius: 4px; }
-            QSlider::handle:horizontal { background: #cba6f7; width: 18px; margin: -5px 0; border-radius: 9px; }
-            QSlider::sub-page:horizontal { background: #cba6f7; border-radius: 4px; }
+        self.btn_tool_config = QPushButton("TOOL KOORDİNAT AYARI (6-DOF)")
+        self.btn_tool_config.setStyleSheet("""
+            QPushButton { background-color: #cba6f7; color: #1e1e2e; font-size: 13px;
+                          padding: 12px; font-weight: bold; }
+            QPushButton:hover { background-color: #e0baff; }
         """)
-        self.slider_tool.valueChanged.connect(self._on_tool_slider_changed)
-        self.slider_tool.sliderReleased.connect(self._on_tool_slider_released)
-        tool_layout.addWidget(self.slider_tool)
-
-        self.lbl_tool_cm = QLabel(f"{self.controller.tool_distance/10:.0f} cm")
-        self.lbl_tool_cm.setAlignment(Qt.AlignCenter)
-        self.lbl_tool_cm.setStyleSheet("color: #6c7086;")
-        tool_layout.addWidget(self.lbl_tool_cm)
+        self.btn_tool_config.clicked.connect(self._open_tool_config)
+        tool_layout.addWidget(self.btn_tool_config)
 
         top_row.addWidget(tool_group)
         main_layout.addLayout(top_row)
@@ -420,6 +536,14 @@ class RobotGUI(QMainWindow):
         """)
         self.btn_emergency.clicked.connect(lambda: self._run_async(self.controller.disable_robot))
 
+        self.btn_clear_alarm = QPushButton("ALARMI\nSIFIRLA")
+        self.btn_clear_alarm.setStyleSheet("""
+            QPushButton { background-color: #f9e2af; color: #1e1e2e; font-size: 13px;
+                          padding: 12px; font-weight: bold; }
+            QPushButton:hover { background-color: #ffefc0; }
+        """)
+        self.btn_clear_alarm.clicked.connect(lambda: self._run_async(self.controller.clear_error))
+
         pos_layout.addWidget(self.btn_save_home)
         pos_layout.addWidget(self.btn_home)
         pos_layout.addWidget(self.btn_surgery)
@@ -427,6 +551,7 @@ class RobotGUI(QMainWindow):
         pos_layout.addWidget(self.btn_enable)
         pos_layout.addWidget(self.btn_stop)
         pos_layout.addWidget(self.btn_emergency)
+        pos_layout.addWidget(self.btn_clear_alarm)
 
         main_layout.addWidget(pos_group)
 
@@ -440,7 +565,7 @@ class RobotGUI(QMainWindow):
             "Sol Analog X → J2 (omuz)\n"
             "Sağ Analog Y → J3 (dirsek)\n"
             "Sağ Analog X → J4 (bilek)\n"
-            "L2 / R2        → J5\n"
+            "D-Pad ◄►      → J5\n"
             "D-Pad ▲▼      → J6"
         )
         tool_text = (
@@ -449,8 +574,8 @@ class RobotGUI(QMainWindow):
             "Sol Analog X → Y (sol/sağ)\n"
             "Sağ Analog Y → Z (yukarı/aşağı)\n"
             "Sağ Analog X → Ry (kafa sola/sağa)\n"
-            "L2 / R2        → Rx (kafa yukarı/aşağı)\n"
-            "D-Pad ▲▼      → Rz (kafa yatırma)"
+            "D-Pad ▲▼      → Rx (kafa yukarı/aşağı)\n"
+            "D-Pad ◄►      → Rz (kafa yatırma)"
         )
 
         lbl_eklem = QLabel(eklem_text)
@@ -469,9 +594,9 @@ class RobotGUI(QMainWindow):
             "SHARE  Eklem ↔ Tool modu\n"
             "L1  Robotu kapat   R1  Robotu aç\n"
             "L3  Home kaydet    R3  Ameliyat kaydet\n"
-            "OPTIONS  Hareketi durdur\n"
-            "D-Pad ◄  HOME'a git\n"
-            "D-Pad ►  AMELİYAT'a git"
+            "OPTIONS  Alarmı sıfırla\n"
+            "L2  HOME'a git\n"
+            "R2  AMELİYAT'a git"
         )
         lbl_btns.setFont(QFont("monospace", 10))
         lbl_btns.setStyleSheet("color: #89b4fa; padding: 8px;")
@@ -571,15 +696,21 @@ class RobotGUI(QMainWindow):
             self.log_text.verticalScrollBar().maximum()
         )
 
-    def _on_tool_slider_changed(self, value):
-        """Slider sürüklenirken sadece etiketi güncelle"""
-        self.lbl_tool_dist.setText(f"{value}mm")
-        self.lbl_tool_cm.setText(f"{value/10:.0f} cm")
+    @staticmethod
+    def _format_tool_summary(offset):
+        """Tool offset özetini iki satırlık metne çevir"""
+        x, y, z, rx, ry, rz = offset
+        return (f"X={int(round(x))}  Y={int(round(y))}  Z={int(round(z))}  mm\n"
+                f"Rx={int(round(rx))}  Ry={int(round(ry))}  Rz={int(round(rz))}  °")
 
-    def _on_tool_slider_released(self):
-        """Slider bırakıldığında robota gönder ve kaydet"""
-        value = self.slider_tool.value()
-        self._run_async(lambda: self.controller.set_tool_distance(value))
+    def _open_tool_config(self):
+        """6-DOF tool koordinat sistemi ayar popup'ını aç"""
+        def _apply(x, y, z, rx, ry, rz):
+            self._run_async(
+                lambda: self.controller.set_tool_offset(x, y, z, rx, ry, rz)
+            )
+        dlg = ToolOffsetDialog(self, self.controller, _apply)
+        dlg.exec_()
 
     def _run_async(self, func):
         threading.Thread(target=func, daemon=True).start()
@@ -615,10 +746,8 @@ class RobotGUI(QMainWindow):
         self.lbl_speed.setText(f"%{c.speed}")
         self.speed_bar.setValue(c.speed)
 
-        # Tool mesafesi (slider hareket etmiyorken güncelle)
-        if not self.slider_tool.isSliderDown():
-            self.lbl_tool_dist.setText(f"{c.tool_distance}mm")
-            self.lbl_tool_cm.setText(f"{c.tool_distance/10:.0f} cm")
+        # Tool offset özeti
+        self.lbl_tool_summary.setText(self._format_tool_summary(c.tool_offset))
 
         # Hata
         if c.error_state:
@@ -672,12 +801,14 @@ class RobotGUI(QMainWindow):
         print(f"[OK] Joystick bağlandı: {js.get_name()} "
               f"({js.get_numaxes()} eksen, {js.get_numbuttons()} buton)")
 
-        if not self.controller.connect():
-            self.worker_running = False
-            self.signals.log.emit("__STATE__:no_robot")
-            js.quit()
-            pygame.quit()
-            return
+        # Auto-connect zaten bağlanmış olabilir; değilse şimdi dene
+        if not self.controller.dashboard:
+            if not self.controller.connect():
+                self.worker_running = False
+                self.signals.log.emit("__STATE__:no_robot")
+                js.quit()
+                pygame.quit()
+                return
 
         self.controller.prepare_robot()
         self.controller.running = True
