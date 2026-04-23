@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
 import pygame
 from dobot_api import DobotApiDashboard
 import time
+import threading
 
 
 # =============================================================================
@@ -113,6 +114,9 @@ MOVJ_SPEED = _S["movj_speed"]
 MIN_JOG_HOLD = _S["min_jog_hold"]
 IDLE_BEFORE_STOP = _S["idle_before_stop"]
 MIN_SWITCH_TIME = _S["min_switch_time"]
+J3_MIN = _S.get("j3_min_deg", -150)
+J3_MAX = _S.get("j3_max_deg", 150)
+JOINT_MONITOR_INTERVAL = _S.get("joint_monitor_interval_s", 0.2)
 
 HOME_JOINTS = None
 SURGERY_JOINTS = None
@@ -200,10 +204,26 @@ class JoystickRobotController:
         self.error_state = False
         self.mode = MODE_JOINT  # Başlangıç modu
         self.drag_active = False  # Drag modu aktif mi
-        self.tool_distance = DEFAULT_TOOL_DISTANCE  # mm
+        # Tool offset: [X, Y, Z, Rx, Ry, Rz] — mm ve derece
+        self.tool_offset = [0.0, 0.0, float(DEFAULT_TOOL_DISTANCE), 0.0, 0.0, 0.0]
+        # Eklem açıları cache'i (soft limit izlemesi için)
+        self.last_joints = None
+        self.last_joints_time = 0.0
+        # L2/R2 edge-tetikleme durumu (pozisyon gitme)
+        self._l2_prev_pressed = False
+        self._r2_prev_pressed = False
         self.home_joints = None
         self.surgery_joints = None
         self._load_positions()
+
+    @property
+    def tool_distance(self):
+        """Tool Z offset'i (mm) — geriye uyumluluk için."""
+        return int(self.tool_offset[2])
+
+    @tool_distance.setter
+    def tool_distance(self, value):
+        self.tool_offset[2] = float(value)
 
     def _load_positions(self):
         """Kayıtlı pozisyonları, tool mesafesini ve hızı dosyadan yükle"""
@@ -214,7 +234,12 @@ class JoystickRobotController:
                     data = json.load(f)
                 self.home_joints = data.get("home")
                 self.surgery_joints = data.get("surgery")
-                self.tool_distance = data.get("tool_distance", DEFAULT_TOOL_DISTANCE)
+                saved_offset = data.get("tool_offset")
+                if saved_offset and len(saved_offset) == 6:
+                    self.tool_offset = [float(v) for v in saved_offset]
+                else:
+                    # Eski format: sadece Z mesafesi
+                    self.tool_distance = data.get("tool_distance", DEFAULT_TOOL_DISTANCE)
                 saved_speed = data.get("speed")
                 if saved_speed is not None:
                     self.speed = max(SPEED_MIN, min(SPEED_MAX, int(saved_speed)))
@@ -222,7 +247,7 @@ class JoystickRobotController:
                     print(f"[POZ] Home yüklendi: {self.home_joints}")
                 if self.surgery_joints:
                     print(f"[POZ] Ameliyat yüklendi: {self.surgery_joints}")
-                print(f"[POZ] Tool mesafesi: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+                print(f"[POZ] Tool offset: {self.tool_offset}")
                 print(f"[POZ] Hız: %{self.speed}")
             except Exception as e:
                 print(f"[POZ] Dosya okunamadı: {e}")
@@ -234,6 +259,7 @@ class JoystickRobotController:
             "home": self.home_joints,
             "surgery": self.surgery_joints,
             "tool_distance": self.tool_distance,
+            "tool_offset": list(self.tool_offset),
             "speed": self.speed,
         }
         try:
@@ -250,6 +276,42 @@ class JoystickRobotController:
         if match:
             return [round(float(x), 2) for x in match.group(1).split(',')]
         return None
+
+    def _update_joints_cache(self):
+        """Eklem açılarını oku ve cache'i güncelle (soft limit için)"""
+        joints = self._read_current_joints()
+        if joints and len(joints) >= 6:
+            self.last_joints = joints
+            self.last_joints_time = time.time()
+
+    def _j3_allows(self, direction):
+        """Mevcut J3 açısı verilen yöne hareket etmeye izin veriyor mu?
+        direction: '+' veya '-' """
+        if not self.last_joints:
+            return True  # Bilinmiyorsa geçir (ilk çağrıda cache boş olabilir)
+        j3 = self.last_joints[2]
+        if direction == '+' and j3 >= J3_MAX:
+            print(f"[LIMIT] J3={j3:.1f}° >= {J3_MAX}° — J3+ ENGELLENDİ")
+            return False
+        if direction == '-' and j3 <= J3_MIN:
+            print(f"[LIMIT] J3={j3:.1f}° <= {J3_MIN}° — J3- ENGELLENDİ")
+            return False
+        return True
+
+    def _check_j3_limit_runtime(self):
+        """Hareket sırasında J3 sınır aşımını kontrol et; aşıldıysa force_stop."""
+        if not self.dashboard or not self.active_jog:
+            return
+        now = time.time()
+        if now - self.last_joints_time < JOINT_MONITOR_INTERVAL:
+            return
+        self._update_joints_cache()
+        if not self.last_joints:
+            return
+        j3 = self.last_joints[2]
+        if j3 > J3_MAX or j3 < J3_MIN:
+            print(f"[LIMIT] J3={j3:.1f}° SINIR DIŞI ({J3_MIN}..{J3_MAX}) → STOP")
+            self._force_stop()
 
     def save_home(self):
         """Mevcut pozisyonu HOME olarak kaydet"""
@@ -278,19 +340,35 @@ class JoystickRobotController:
             print("[UYARI] Pozisyon okunamadı")
 
     def set_tool_distance(self, distance_mm):
-        """Tool mesafesini ayarla ve robota gönder"""
+        """Sadece Z mesafesini ayarla (geriye uyumluluk için)"""
         self.tool_distance = int(distance_mm)
         self._save_positions()
         self._apply_tool()
-        print(f"[TOOL] Mesafe: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+        print(f"[TOOL] Z mesafe: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+
+    def set_tool_offset(self, x, y, z, rx, ry, rz):
+        """Tam 6-DOF tool ofseti ayarla (X, Y, Z mm; Rx, Ry, Rz derece)"""
+        self.tool_offset = [float(x), float(y), float(z),
+                            float(rx), float(ry), float(rz)]
+        self._save_positions()
+        self._apply_tool()
+        print(f"[TOOL] Offset ayarlandı: X={x} Y={y} Z={z} Rx={rx} Ry={ry} Rz={rz}")
 
     def _apply_tool(self):
-        """Mevcut tool mesafesini robota uygula"""
+        """Mevcut tool ofsetini robota uygula ve cevapları doğrula"""
         if not self.dashboard:
             return
-        tool_cmd = f"SetTool({TOOL_INDEX},{{0.0,0.0,{float(self.tool_distance)},0.0,0.0,0.0}})"
-        self._safe_cmd(self.dashboard.sendRecvMsg, tool_cmd)
-        self._safe_cmd(self.dashboard.Tool, TOOL_INDEX)
+        x, y, z, rx, ry, rz = self.tool_offset
+        tool_cmd = (f"SetTool({TOOL_INDEX},"
+                    f"{{{x},{y},{z},{rx},{ry},{rz}}})")
+        resp_set = self._safe_cmd(self.dashboard.sendRecvMsg, tool_cmd)
+        print(f"[TOOL] SetTool({TOOL_INDEX}, {self.tool_offset}) -> {resp_set}")
+        time.sleep(0.1)
+        resp_sel = self._safe_cmd(self.dashboard.Tool, TOOL_INDEX)
+        print(f"[TOOL] Tool({TOOL_INDEX}) -> {resp_sel}")
+        time.sleep(0.1)
+        pose = self._safe_cmd(self.dashboard.GetPose)
+        print(f"[TOOL] GetPose -> {pose}")
 
     pass
 
@@ -318,6 +396,11 @@ class JoystickRobotController:
         try:
             self.dashboard = DobotApiDashboard(self.robot_ip, DASHBOARD_PORT)
             print(f"[OK] Robot bağlantısı kuruldu: {self.robot_ip}")
+            # Bağlantı kurulur kurulmaz tool offset'i robota bas — Enable'dan
+            # bağımsız. Böylece singularity/alarm sonrası sıfırlanmış olsa bile
+            # uygulama açılışında robot bizim belleğimizdeki offset ile eşlenir.
+            time.sleep(0.2)
+            self._apply_tool()
             return True
         except Exception as e:
             print(f"[HATA] Robot bağlantısı başarısız: {e}")
@@ -414,14 +497,15 @@ class JoystickRobotController:
         print(f"  MOD DEĞİŞTİ → [{self.mode}]")
         if self.mode == MODE_TOOL:
             print("  Sol Analog : X/Y hareket")
-            print("  Sağ Analog : Z hareket + Rz dönüş")
-            print("  L2/R2      : Rx dönüş")
-            print("  D-Pad      : Ry dönüş")
+            print("  Sağ Analog : Z hareket + Ry dönüş")
+            print("  D-Pad ▲▼   : Rx dönüş")
+            print("  D-Pad ◄►   : Rz dönüş")
         else:
             print("  Sol Analog : J1/J2")
             print("  Sağ Analog : J3/J4")
-            print("  L2/R2      : J5")
-            print("  D-Pad      : J6")
+            print("  D-Pad ◄►   : J5")
+            print("  D-Pad ▲▼   : J6")
+        print("  L2 : HOME'a git   R2 : AMELİYAT'a git")
         print(f"{'='*50}\n")
 
     def enable_robot(self):
@@ -433,7 +517,17 @@ class JoystickRobotController:
         print(f"[ROBOT] Disable: {resp}")
 
     def clear_error(self):
-        self.prepare_robot()
+        """Sadece alarmı temizle ve robotu yeniden etkinleştir (tool/hız ayarlarını korur)."""
+        self._force_stop()
+        resp_clear = self._safe_cmd(self.dashboard.ClearError)
+        print(f"[ALARM] ClearError: {resp_clear}")
+        time.sleep(0.3)
+        resp_enable = self._safe_cmd(self.dashboard.EnableRobot)
+        print(f"[ALARM] EnableRobot: {resp_enable}")
+        time.sleep(0.3)
+        # Alarm + Enable döngüsü robot kontrolcüsünde tool'u sıfırlayabilir;
+        # kayıtlı offset'i tekrar robota bas
+        self._apply_tool()
 
     def toggle_drag(self):
         """Drag modu aç/kapat. Kapanınca mevcut pozisyondan +5cm tool ayarla."""
@@ -575,9 +669,9 @@ class JoystickRobotController:
                 print(f"\n{'='*50}")
                 print(f"  TOOL MODUNA GEÇİLDİ (ameliyat pozisyonu)")
                 print(f"  Sol Analog : X/Y hareket")
-                print(f"  Sağ Analog : Z hareket + Rz dönüş")
-                print(f"  L2/R2      : Rx dönüş")
-                print(f"  D-Pad      : Ry dönüş")
+                print(f"  Sağ Analog : Z hareket + Ry dönüş")
+                print(f"  D-Pad ▲▼   : Rx dönüş")
+                print(f"  D-Pad ◄►   : Rz dönüş")
                 print(f"{'='*50}\n")
             elif name == "HOME":
                 self.mode = MODE_JOINT
@@ -600,6 +694,13 @@ class JoystickRobotController:
             self.recover_from_error()
             return
 
+        # Eklem modunda J3 soft limit ön kontrolü
+        if self.mode == MODE_JOINT and axis_id.startswith("J3"):
+            self._update_joints_cache()
+            direction = axis_id[-1]  # '+' veya '-'
+            if not self._j3_allows(direction):
+                return
+
         now = time.time()
 
         if self.active_jog:
@@ -615,13 +716,11 @@ class JoystickRobotController:
             # Eklem modu: coordtype yok
             resp = self._safe_cmd(self.dashboard.MoveJog, axis_id)
         else:
-            # Tool modu:
-            # Dönüş (Rx/Ry/Rz) → coordtype=1 (user) → TCP noktası sabit, flanş etrafında döner
-            # Kaydırma (X/Y/Z) → coordtype=2 (tool) → tool eksenlerinde hareket
-            if axis_id.startswith("R"):
-                resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 1, -1, TOOL_INDEX)
-            else:
-                resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 2, -1, TOOL_INDEX)
+            # Tool modu: coordtype=2 (tool frame) — hem kaydırma hem dönüş
+            # tool orijinini (TCP) referans alır. Dönüşlerde TCP sabit kalır,
+            # sadece yönelim değişir (gimbal davranışı).
+            print(f"[TOOL-JOG] MoveJog({axis_id}, coordtype=2, tool={TOOL_INDEX})")
+            resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 2, -1, TOOL_INDEX)
 
         err = self._parse_error_code(resp)
         print(f"[{self.mode}] MoveJog({axis_id}) -> {resp}")
@@ -685,19 +784,19 @@ class JoystickRobotController:
         print(f"  Home: {home_str} | Ameliyat: {surg_str}")
         print("=" * 50)
         print("  ---  POZİSYON  ---")
-        print("  D-Pad Sol    : HOME pozisyonuna git")
-        print("  D-Pad Sağ    : AMELİYAT pozisyonuna git")
+        print("  L2           : HOME pozisyonuna git")
+        print("  R2           : AMELİYAT pozisyonuna git")
         print("  L3           : Mevcut pozisyonu yazdır")
         print("  ---  EKLEM MODU  ---")
         print("  Sol Analog   : J1 / J2")
         print("  Sağ Analog   : J3 / J4")
-        print("  L2/R2        : J5")
-        print("  D-Pad Y      : J6")
+        print("  D-Pad ◄►     : J5")
+        print("  D-Pad ▲▼     : J6")
         print("  ---  TOOL MODU  ---")
         print("  Sol Analog   : X / Y hareket")
-        print("  Sağ Analog   : Z hareket / Rz dönüş")
-        print("  L2/R2        : Rx dönüş")
-        print("  D-Pad Y      : Ry dönüş")
+        print("  Sağ Analog   : Z hareket / Ry dönüş")
+        print("  D-Pad ▲▼     : Rx dönüş")
+        print("  D-Pad ◄►     : Rz dönüş")
         print("  ---  BUTONLAR  ---")
         print("  SHARE        : Mod değiştir (Eklem ↔ Tool)")
         print("  Üçgen/X      : Hız artır/azalt")
@@ -722,6 +821,7 @@ class JoystickRobotController:
                     break
 
                 self._handle_axes(js)
+                self._check_j3_limit_runtime()
                 time.sleep(loop_delay)
 
         except KeyboardInterrupt:
@@ -763,8 +863,8 @@ class JoystickRobotController:
             print(f"[BUTON] {name} → Robot Enable (Linux: R1)")
             self.enable_robot()
         elif _is(BTN_OPTIONS):
-            print(f"[BUTON] {name} → Durdur (MoveJog stop)")
-            self._force_stop()
+            print(f"[BUTON] {name} → Alarmı sıfırla (ClearError)")
+            self.clear_error()
         elif _is(BTN_L3):
             print(f"[BUTON] {name} → Home pozisyonu KAYDET")
             self.save_home()
@@ -774,12 +874,21 @@ class JoystickRobotController:
         elif _is(BTN_SHARE):
             print(f"[BUTON] {name} → Mod değiştir (Eklem ↔ Tool)")
             self.toggle_mode()
-        elif _is(BTN_HOME_GO):
+        elif _is(BTN_HOME_GO) or _is(BTN_SURGERY_GO):
+            # D-Pad sol/sağ artık jog ediyor — _handle_axes içinde.
+            pass
+        elif _is(BTN_L2):
             print(f"[BUTON] {name} → HOME pozisyonuna git")
-            self.go_to_position(self.home_joints, "HOME")
-        elif _is(BTN_SURGERY_GO):
+            threading.Thread(
+                target=lambda: self.go_to_position(self.home_joints, "HOME"),
+                daemon=True,
+            ).start()
+        elif _is(BTN_R2):
             print(f"[BUTON] {name} → AMELİYAT pozisyonuna git")
-            self.go_to_position(self.surgery_joints, "AMELİYAT")
+            threading.Thread(
+                target=lambda: self.go_to_position(self.surgery_joints, "AMELİYAT"),
+                daemon=True,
+            ).start()
         elif _is(BTN_TRIANGLE):
             print(f"[BUTON] {name} → Hız artır (%{self.speed} → %{min(self.speed+SPEED_STEP, SPEED_MAX)})")
             self.set_speed(self.speed + SPEED_STEP)
@@ -797,15 +906,9 @@ class JoystickRobotController:
         else:
             print(f"[BUTON] B{button} → (atanmamış)")
 
-    def _handle_dpad(self, value):
-        """D-Pad olaylarını işle: sol/sağ=pozisyon git, yukarı/aşağı=jog"""
-        hat_x, hat_y = value
-        if hat_x == -1:
-            print("[D-PAD] ◄ Sol → HOME pozisyonuna git")
-            self.go_to_position(self.home_joints, "HOME")
-        elif hat_x == 1:
-            print("[D-PAD] ► Sağ → AMELİYAT pozisyonuna git")
-            self.go_to_position(self.surgery_joints, "AMELİYAT")
+    def _handle_dpad(self, _value):
+        """D-Pad olayları _handle_axes içinde sürekli okunur; burada iş yok."""
+        pass
 
     def _handle_axes(self, js):
         # Drag modundayken joystick jog gönderme
@@ -828,6 +931,33 @@ class JoystickRobotController:
         elif BTN_DPAD_DOWN >= 0 and js.get_button(BTN_DPAD_DOWN):
             dpad_y = -1
 
+        # D-Pad X (sol/sağ) — Linux'ta hat[0], Windows'ta buton 13/14.
+        dpad_x = hat[0]
+        if BTN_HOME_GO >= 0 and js.get_button(BTN_HOME_GO):
+            dpad_x = -1
+        elif BTN_SURGERY_GO >= 0 and js.get_button(BTN_SURGERY_GO):
+            dpad_x = 1
+
+        # L2/R2 edge-tetikli pozisyon git komutları (Windows: axis tabanlı)
+        l2_val = (l2 + 1) / 2
+        r2_val = (r2 + 1) / 2
+        l2_pressed = l2_val > 0.5
+        r2_pressed = r2_val > 0.5
+        if l2_pressed and not self._l2_prev_pressed:
+            print("[L2] → HOME pozisyonuna git")
+            threading.Thread(
+                target=lambda: self.go_to_position(self.home_joints, "HOME"),
+                daemon=True,
+            ).start()
+        if r2_pressed and not self._r2_prev_pressed:
+            print("[R2] → AMELİYAT pozisyonuna git")
+            threading.Thread(
+                target=lambda: self.go_to_position(self.surgery_joints, "AMELİYAT"),
+                daemon=True,
+            ).start()
+        self._l2_prev_pressed = l2_pressed
+        self._r2_prev_pressed = r2_pressed
+
         candidates = []
 
         if self.mode == MODE_JOINT:
@@ -841,44 +971,38 @@ class JoystickRobotController:
             if abs(rx) > DEADZONE:
                 candidates.append(("J4", abs(rx), "J4+" if rx > 0 else "J4-"))
 
-            l2_val = (l2 + 1) / 2
-            r2_val = (r2 + 1) / 2
-            if l2_val > 0.3:
-                candidates.append(("J5+", l2_val, "J5+"))
-            if r2_val > 0.3:
-                candidates.append(("J5-", r2_val, "J5-"))
+            # D-Pad sol/sağ → J5 (eski L2/R2 görevi)
+            if dpad_x != 0:
+                candidates.append(("J5", 1.0, "J5+" if dpad_x < 0 else "J5-"))
 
-            # D-Pad yukarı/aşağı → J6 (sol/sağ artık pozisyon gitme)
+            # D-Pad yukarı/aşağı → J6
             if dpad_y != 0:
                 candidates.append(("J6", 1.0, "J6+" if dpad_y > 0 else "J6-"))
 
         else:
             # --- TOOL MODU ---
-            # Sol analog: X/Y kaydırma (tool eksenleri)
-            if abs(ly) > DEADZONE:
-                candidates.append(("X", abs(ly), "X-" if ly > 0 else "X+"))
+            # Sol analog X: X ekseni (sağa → X+, sola → X-)
             if abs(lx) > DEADZONE:
-                candidates.append(("Y", abs(lx), "Y+" if lx > 0 else "Y-"))
+                candidates.append(("X", abs(lx), "X+" if lx > 0 else "X-"))
+            # Sol analog Y: Y ekseni (yukarı → Y+, aşağı → Y-)
+            if abs(ly) > DEADZONE:
+                candidates.append(("Y", abs(ly), "Y-" if ly > 0 else "Y+"))
 
-            # Sağ analog Y: Z yukarı/aşağı (kaydırma)
+            # Sağ analog Y: Z ekseni (yukarı → Z-, aşağı → Z+)
             if abs(ry) > DEADZONE:
-                candidates.append(("Z", abs(ry), "Z-" if ry > 0 else "Z+"))
+                candidates.append(("Z", abs(ry), "Z+" if ry > 0 else "Z-"))
 
-            # Sağ analog X: Ry dönüş = kafa sola/sağa (tool noktası sabit)
+            # Sağ analog X: Ry dönüş (sağa → Ry+, sola → Ry-)
             if abs(rx) > DEADZONE:
                 candidates.append(("Ry", abs(rx), "Ry+" if rx > 0 else "Ry-"))
 
-            # L2/R2: Rx dönüş = kafa yukarı/aşağı (tool noktası sabit)
-            l2_val = (l2 + 1) / 2
-            r2_val = (r2 + 1) / 2
-            if l2_val > 0.3:
-                candidates.append(("Rx-", l2_val, "Rx-"))
-            if r2_val > 0.3:
-                candidates.append(("Rx+", r2_val, "Rx+"))
-
-            # D-Pad Y: Rz dönüş = kafa yatırma
+            # D-Pad ▲▼: Rx dönüş (yukarı → Rx-, aşağı → Rx+)
             if dpad_y != 0:
-                candidates.append(("Rz", 1.0, "Rz+" if dpad_y > 0 else "Rz-"))
+                candidates.append(("Rx", 1.0, "Rx-" if dpad_y > 0 else "Rx+"))
+
+            # D-Pad ◄►: Rz dönüş (sola → Rz+, sağa → Rz-)
+            if dpad_x != 0:
+                candidates.append(("Rz", 1.0, "Rz+" if dpad_x < 0 else "Rz-"))
 
         if candidates:
             candidates.sort(key=lambda c: c[1], reverse=True)
