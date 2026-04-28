@@ -10,23 +10,27 @@ SHARE toggles between modes.
 
 Control map:
   JOINT MODE:                      TOOL MODE:
-  Left Stick Y : J1 base           Left Stick Y : X forward/back
-  Left Stick X : J2 shoulder       Left Stick X : Y left/right
-  Right Stick Y: J3 elbow          Right Stick Y: Z up/down
-  Right Stick X: J4 wrist 1        Right Stick X: Rz rotation
-  L2 / R2      : J5 wrist 2        L2 / R2      : Rx rotation
-  D-Pad Y      : J6 tip rotation   D-Pad Y      : Ry rotation
+  Left Stick Y : J1 base           Left Stick X : X axis
+  Left Stick X : J2 shoulder       Left Stick Y : Y axis
+  Right Stick Y: J3 elbow          Right Stick Y: Z axis
+  Right Stick X: J4 wrist 1        Right Stick X: Ry rotation
+  D-Pad <>     : J5                D-Pad ^v     : Rx rotation
+  D-Pad ^v     : J6                D-Pad <>     : Rz rotation
 
   Buttons:
     SHARE          -> Switch mode (Joint <-> Tool)
-    X (Cross)      -> Decrease speed
-    Triangle       -> Increase speed
-    Square         -> Stop robot
-    Circle         -> Clear errors
+    Triangle       -> J4+ jog (TOOL mode only; unassigned in JOINT mode)
+    X (Cross)      -> J4- jog (TOOL mode only; unassigned in JOINT mode)
+    Square         -> EMERGENCY STOP (disable robot)
+    Circle         -> Toggle drag mode
     L1             -> Disable robot
-    R1             -> Enable robot
-    Options        -> Quit
-    PS (Home)      -> Emergency stop
+    R1             -> Enable + prepare robot
+    L2             -> Go to HOME pose
+    R2             -> Go to SURGERY pose
+    L3             -> (unassigned)
+    R3             -> (unassigned)
+    Options        -> Clear alarm (preserve tool/speed settings)
+    PS (Home)      -> (unassigned)
 """
 
 import sys
@@ -46,6 +50,7 @@ sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
 import pygame
 from dobot_api import DobotApiDashboard
 import time
+import threading
 
 
 # =============================================================================
@@ -116,6 +121,9 @@ MOVJ_SPEED = _S["movj_speed"]
 MIN_JOG_HOLD = _S["min_jog_hold"]
 IDLE_BEFORE_STOP = _S["idle_before_stop"]
 MIN_SWITCH_TIME = _S["min_switch_time"]
+J3_MIN = _S.get("j3_min_deg", -150)
+J3_MAX = _S.get("j3_max_deg", 150)
+JOINT_MONITOR_INTERVAL = _S.get("joint_monitor_interval_s", 0.2)
 
 HOME_JOINTS = None
 SURGERY_JOINTS = None
@@ -131,15 +139,15 @@ if _platform.system() == "Windows":
     BTN_TRIANGLE   = 3    # Increase speed
     BTN_SHARE      = 4    # Switch mode (matches Linux SHARE: toggle_mode)
     BTN_PS         = 5    # Unassigned (per user request)
-    BTN_OPTIONS    = 6    # Stop (force_stop)
-    BTN_L3         = 7    # Save Home (Linux L3)
-    BTN_R3         = 8    # Save Surgery (Linux R3)
+    BTN_OPTIONS    = 6    # Clear alarm (clear_error)
+    BTN_L3         = 7    # Save Home pose (Linux L3)
+    BTN_R3         = 8    # Save Surgery pose (Linux R3)
     BTN_L1         = 9    # Disable robot (Linux L1)
     BTN_R1         = 10   # Enable robot (Linux R1)
-    BTN_DPAD_UP    = 11   # D-Pad up   -> J6+ (joint) / Rz+ (tool)
-    BTN_DPAD_DOWN  = 12   # D-Pad down -> J6- (joint) / Rz- (tool)
-    BTN_HOME_GO    = 13   # D-Pad left  -> go to HOME
-    BTN_SURGERY_GO = 14   # D-Pad right -> go to SURGERY
+    BTN_DPAD_UP    = 11   # D-Pad up   -> J6+ (joint) / Rx- (tool)
+    BTN_DPAD_DOWN  = 12   # D-Pad down -> J6- (joint) / Rx+ (tool)
+    BTN_HOME_GO    = 13   # D-Pad left  -> J5+ (joint) / Rz+ (tool)
+    BTN_SURGERY_GO = 14   # D-Pad right -> J5- (joint) / Rz- (tool)
     # B15: touchpad          (unassigned)
     # B16: microphone        captured by Windows OS, no event
     BTN_L2      = -91     # axis 4, not a button
@@ -211,13 +219,29 @@ class JoystickRobotController:
         self.error_state = False
         self.mode = MODE_JOINT
         self.drag_active = False
-        self.tool_distance = DEFAULT_TOOL_DISTANCE  # mm
+        # Tool offset: [X, Y, Z, Rx, Ry, Rz] - mm and degrees
+        self.tool_offset = [0.0, 0.0, float(DEFAULT_TOOL_DISTANCE), 0.0, 0.0, 0.0]
+        # Joint angle cache (used for soft-limit monitoring)
+        self.last_joints = None
+        self.last_joints_time = 0.0
+        # L2/R2 edge-trigger state (used to fire pose recalls once per press)
+        self._l2_prev_pressed = False
+        self._r2_prev_pressed = False
         self.home_joints = None
         self.surgery_joints = None
         self._load_positions()
 
+    @property
+    def tool_distance(self):
+        """Tool Z offset (mm) - kept for backward compatibility."""
+        return int(self.tool_offset[2])
+
+    @tool_distance.setter
+    def tool_distance(self, value):
+        self.tool_offset[2] = float(value)
+
     def _load_positions(self):
-        """Load saved poses, tool distance and speed from disk."""
+        """Load saved poses, tool offset and speed from disk."""
         import json
         if os.path.exists(POSITIONS_FILE):
             try:
@@ -225,7 +249,12 @@ class JoystickRobotController:
                     data = json.load(f)
                 self.home_joints = data.get("home")
                 self.surgery_joints = data.get("surgery")
-                self.tool_distance = data.get("tool_distance", DEFAULT_TOOL_DISTANCE)
+                saved_offset = data.get("tool_offset")
+                if saved_offset and len(saved_offset) == 6:
+                    self.tool_offset = [float(v) for v in saved_offset]
+                else:
+                    # Legacy format: only the Z distance
+                    self.tool_distance = data.get("tool_distance", DEFAULT_TOOL_DISTANCE)
                 saved_speed = data.get("speed")
                 if saved_speed is not None:
                     self.speed = max(SPEED_MIN, min(SPEED_MAX, int(saved_speed)))
@@ -233,18 +262,19 @@ class JoystickRobotController:
                     print(f"[POSE] Home loaded: {self.home_joints}")
                 if self.surgery_joints:
                     print(f"[POSE] Surgery loaded: {self.surgery_joints}")
-                print(f"[POSE] Tool distance: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+                print(f"[POSE] Tool offset: {self.tool_offset}")
                 print(f"[POSE] Speed: %{self.speed}")
             except Exception as e:
                 print(f"[POSE] Failed to read positions file: {e}")
 
     def _save_positions(self):
-        """Persist poses, tool distance and speed to disk."""
+        """Persist poses, tool offset and speed to disk."""
         import json
         data = {
             "home": self.home_joints,
             "surgery": self.surgery_joints,
             "tool_distance": self.tool_distance,
+            "tool_offset": list(self.tool_offset),
             "speed": self.speed,
         }
         try:
@@ -254,13 +284,51 @@ class JoystickRobotController:
             print(f"[POSE] Failed to write positions file: {e}")
 
     def _read_current_joints(self):
-        """Read the current joint angles and return them as a list."""
+        """Read current joint angles and return them as a list."""
         import re
         resp = str(self._safe_cmd(self.dashboard.GetAngle))
         match = re.search(r'\{([^}]+)\}', resp)
         if match:
             return [round(float(x), 2) for x in match.group(1).split(',')]
         return None
+
+    def _update_joints_cache(self):
+        """Read joint angles and refresh the cache (for soft-limit checks)."""
+        joints = self._read_current_joints()
+        if joints and len(joints) >= 6:
+            self.last_joints = joints
+            self.last_joints_time = time.time()
+
+    def _j3_allows(self, direction):
+        """Does the current J3 angle allow motion in the given direction?
+
+        direction: '+' or '-'
+        """
+        if not self.last_joints:
+            return True  # Unknown -> allow (cache may be empty on first call)
+        j3 = self.last_joints[2]
+        if direction == '+' and j3 >= J3_MAX:
+            print(f"[LIMIT] J3={j3:.1f} deg >= {J3_MAX} deg - J3+ BLOCKED")
+            return False
+        if direction == '-' and j3 <= J3_MIN:
+            print(f"[LIMIT] J3={j3:.1f} deg <= {J3_MIN} deg - J3- BLOCKED")
+            return False
+        return True
+
+    def _check_j3_limit_runtime(self):
+        """While moving, check the J3 soft limit; force_stop on overrun."""
+        if not self.dashboard or not self.active_jog:
+            return
+        now = time.time()
+        if now - self.last_joints_time < JOINT_MONITOR_INTERVAL:
+            return
+        self._update_joints_cache()
+        if not self.last_joints:
+            return
+        j3 = self.last_joints[2]
+        if j3 > J3_MAX or j3 < J3_MIN:
+            print(f"[LIMIT] J3={j3:.1f} deg OUT OF RANGE ({J3_MIN}..{J3_MAX}) -> STOP")
+            self._force_stop()
 
     def save_home(self):
         """Save the current pose as HOME."""
@@ -289,19 +357,35 @@ class JoystickRobotController:
             print("[WARN] Could not read current pose")
 
     def set_tool_distance(self, distance_mm):
-        """Update the tool distance and push it to the robot."""
+        """Set only the Z distance (kept for backward compatibility)."""
         self.tool_distance = int(distance_mm)
         self._save_positions()
         self._apply_tool()
-        print(f"[TOOL] Distance: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+        print(f"[TOOL] Z distance: {self.tool_distance}mm ({self.tool_distance/10:.0f}cm)")
+
+    def set_tool_offset(self, x, y, z, rx, ry, rz):
+        """Set the full 6-DOF tool offset (X, Y, Z mm; Rx, Ry, Rz degrees)."""
+        self.tool_offset = [float(x), float(y), float(z),
+                            float(rx), float(ry), float(rz)]
+        self._save_positions()
+        self._apply_tool()
+        print(f"[TOOL] Offset set: X={x} Y={y} Z={z} Rx={rx} Ry={ry} Rz={rz}")
 
     def _apply_tool(self):
-        """Apply the current tool distance to the robot."""
+        """Push the current tool offset to the robot and verify the responses."""
         if not self.dashboard:
             return
-        tool_cmd = f"SetTool({TOOL_INDEX},{{0.0,0.0,{float(self.tool_distance)},0.0,0.0,0.0}})"
-        self._safe_cmd(self.dashboard.sendRecvMsg, tool_cmd)
-        self._safe_cmd(self.dashboard.Tool, TOOL_INDEX)
+        x, y, z, rx, ry, rz = self.tool_offset
+        tool_cmd = (f"SetTool({TOOL_INDEX},"
+                    f"{{{x},{y},{z},{rx},{ry},{rz}}})")
+        resp_set = self._safe_cmd(self.dashboard.sendRecvMsg, tool_cmd)
+        print(f"[TOOL] SetTool({TOOL_INDEX}, {self.tool_offset}) -> {resp_set}")
+        time.sleep(0.1)
+        resp_sel = self._safe_cmd(self.dashboard.Tool, TOOL_INDEX)
+        print(f"[TOOL] Tool({TOOL_INDEX}) -> {resp_sel}")
+        time.sleep(0.1)
+        pose = self._safe_cmd(self.dashboard.GetPose)
+        print(f"[TOOL] GetPose -> {pose}")
 
     def _safe_cmd(self, func, *args):
         if not self.dashboard:
@@ -327,6 +411,11 @@ class JoystickRobotController:
         try:
             self.dashboard = DobotApiDashboard(self.robot_ip, DASHBOARD_PORT)
             print(f"[OK] Robot connection established: {self.robot_ip}")
+            # Push the tool offset to the robot as soon as we connect, before
+            # Enable. That way, even if the controller reset it after a
+            # singularity/alarm, our in-memory offset is mirrored on startup.
+            time.sleep(0.2)
+            self._apply_tool()
             return True
         except Exception as e:
             print(f"[ERROR] Robot connection failed: {e}")
@@ -400,8 +489,8 @@ class JoystickRobotController:
         if ready:
             print("[PREP] Robot ready! (Mode 5 = Idle)")
         else:
-            print("[WARN] Robot did not reach Mode 5. Check the physical E-stop or clear "
-                  "any errors on the teach pendant, then retry.")
+            print("[WARN] Robot did not reach Mode 5. Check the physical E-stop "
+                  "or clear any errors on the teach pendant, then retry.")
 
     def recover_from_error(self):
         print("[RECOVER] Error detected, recovering...")
@@ -422,14 +511,15 @@ class JoystickRobotController:
         print(f"  MODE SWITCHED -> [{self.mode}]")
         if self.mode == MODE_TOOL:
             print("  Left stick  : X/Y translation")
-            print("  Right stick : Z translation + Rz rotation")
-            print("  L2/R2       : Rx rotation")
-            print("  D-Pad       : Ry rotation")
+            print("  Right stick : Z translation + Ry rotation")
+            print("  D-Pad ^v    : Rx rotation")
+            print("  D-Pad <>    : Rz rotation")
         else:
             print("  Left stick  : J1/J2")
             print("  Right stick : J3/J4")
-            print("  L2/R2       : J5")
-            print("  D-Pad       : J6")
+            print("  D-Pad <>    : J5")
+            print("  D-Pad ^v    : J6")
+        print("  L2 : Go to HOME   R2 : Go to SURGERY")
         print(f"{'='*50}\n")
 
     def enable_robot(self):
@@ -441,7 +531,17 @@ class JoystickRobotController:
         print(f"[ROBOT] Disable: {resp}")
 
     def clear_error(self):
-        self.prepare_robot()
+        """Clear the alarm and re-enable the robot (preserves tool/speed settings)."""
+        self._force_stop()
+        resp_clear = self._safe_cmd(self.dashboard.ClearError)
+        print(f"[ALARM] ClearError: {resp_clear}")
+        time.sleep(0.3)
+        resp_enable = self._safe_cmd(self.dashboard.EnableRobot)
+        print(f"[ALARM] EnableRobot: {resp_enable}")
+        time.sleep(0.3)
+        # The Alarm + Enable cycle can reset the tool on the controller side;
+        # push our stored offset back to the robot.
+        self._apply_tool()
 
     def toggle_drag(self):
         """Toggle drag mode. On exit, apply the tool offset from the current pose."""
@@ -484,7 +584,7 @@ class JoystickRobotController:
                 print(f"\n{'='*50}")
                 print(f"  TOOL APPLIED!")
                 print(f"  {self.tool_distance}mm ({self.tool_distance/10:.0f}cm) ahead of the flange")
-                print(f"  Tool mode active - joystick now rotates around this point")
+                print(f"  Tool mode active - joystick now operates around this point")
                 print(f"{'='*50}\n")
 
                 # Auto switch to Tool mode
@@ -581,9 +681,9 @@ class JoystickRobotController:
                 print(f"\n{'='*50}")
                 print(f"  SWITCHED TO TOOL MODE (surgery pose)")
                 print(f"  Left stick  : X/Y translation")
-                print(f"  Right stick : Z translation + Rz rotation")
-                print(f"  L2/R2       : Rx rotation")
-                print(f"  D-Pad       : Ry rotation")
+                print(f"  Right stick : Z translation + Ry rotation")
+                print(f"  D-Pad ^v    : Rx rotation")
+                print(f"  D-Pad <>    : Rz rotation")
                 print(f"{'='*50}\n")
             elif name == POS_HOME:
                 self.mode = MODE_JOINT
@@ -606,6 +706,13 @@ class JoystickRobotController:
             self.recover_from_error()
             return
 
+        # Joint-mode J3 soft-limit pre-check
+        if self.mode == MODE_JOINT and axis_id.startswith("J3"):
+            self._update_joints_cache()
+            direction = axis_id[-1]  # '+' or '-'
+            if not self._j3_allows(direction):
+                return
+
         now = time.time()
 
         if self.active_jog:
@@ -617,17 +724,17 @@ class JoystickRobotController:
         self.active_jog = axis_id
         self.last_jog_start = now
 
-        if self.mode == MODE_JOINT:
-            # Joint mode: no coordtype
+        if axis_id.startswith("J"):
+            # Joint-space jog (J1..J6) - sent without coordtype regardless of
+            # the current mode. This lets us drive joints like J4 even while
+            # operating in tool mode (e.g. Triangle/Cross -> J4).
             resp = self._safe_cmd(self.dashboard.MoveJog, axis_id)
         else:
-            # Tool mode:
-            # Rotations (Rx/Ry/Rz) -> coordtype=1 (user) -> TCP fixed, flange rotates
-            # Translations (X/Y/Z) -> coordtype=2 (tool) -> move along tool axes
-            if axis_id.startswith("R"):
-                resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 1, -1, TOOL_INDEX)
-            else:
-                resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 2, -1, TOOL_INDEX)
+            # Cartesian / tool-frame jog: coordtype=2 means both translation
+            # and rotation reference the tool origin (TCP). The TCP stays
+            # fixed during rotations - only orientation changes (gimbal).
+            print(f"[TOOL-JOG] MoveJog({axis_id}, coordtype=2, tool={TOOL_INDEX})")
+            resp = self._safe_cmd(self.dashboard.MoveJog, axis_id, 2, -1, TOOL_INDEX)
 
         err = self._parse_error_code(resp)
         print(f"[{self.mode}] MoveJog({axis_id}) -> {resp}")
@@ -691,28 +798,27 @@ class JoystickRobotController:
         print(f"  Home: {home_str} | Surgery: {surg_str}")
         print("=" * 50)
         print("  ---  POSITION  ---")
-        print("  D-Pad Left   : Go to HOME pose")
-        print("  D-Pad Right  : Go to SURGERY pose")
-        print("  L3           : Save current pose as Home")
-        print("  R3           : Save current pose as Surgery")
+        print("  L2           : Go to HOME pose")
+        print("  R2           : Go to SURGERY pose")
+        print("  L3 / R3      : (unassigned)")
         print("  ---  JOINT MODE  ---")
         print("  Left stick   : J1 / J2")
         print("  Right stick  : J3 / J4")
-        print("  L2/R2        : J5")
-        print("  D-Pad Y      : J6")
+        print("  D-Pad <>     : J5")
+        print("  D-Pad ^v     : J6")
         print("  ---  TOOL MODE  ---")
         print("  Left stick   : X / Y translation")
-        print("  Right stick  : Z translation / Rz rotation")
-        print("  L2/R2        : Rx rotation")
-        print("  D-Pad Y      : Ry rotation")
+        print("  Right stick  : Z translation / Ry rotation")
+        print("  D-Pad ^v     : Rx rotation")
+        print("  D-Pad <>     : Rz rotation")
+        print("  Triangle / X : J4+ / J4- jog (TOOL mode only)")
         print("  ---  BUTTONS  ---")
         print("  SHARE        : Switch mode (Joint <-> Tool)")
-        print("  Triangle/X   : Speed up/down")
-        print("  Square       : Stop")
+        print("  Square       : EMERGENCY STOP (disable robot)")
+        print("  Circle       : Drag mode")
         print("  R1           : Enable + Prepare")
         print("  L1           : Disable")
-        print("  Options      : Quit")
-        print("  PS           : EMERGENCY STOP")
+        print("  Options      : Clear alarm")
         print("=" * 50 + "\n")
 
         try:
@@ -729,6 +835,7 @@ class JoystickRobotController:
                     break
 
                 self._handle_axes(js)
+                self._check_j3_limit_runtime()
                 time.sleep(loop_delay)
 
         except KeyboardInterrupt:
@@ -770,49 +877,47 @@ class JoystickRobotController:
             print(f"[BTN] {name} -> Robot Enable (Linux: R1)")
             self.enable_robot()
         elif _is(BTN_OPTIONS):
-            print(f"[BTN] {name} -> Stop (MoveJog stop)")
-            self._force_stop()
-        elif _is(BTN_L3):
-            print(f"[BTN] {name} -> Save Home pose")
-            self.save_home()
-        elif _is(BTN_R3):
-            print(f"[BTN] {name} -> Save Surgery pose")
-            self.save_surgery()
+            print(f"[BTN] {name} -> Clear alarm (ClearError)")
+            self.clear_error()
+        elif _is(BTN_L3) or _is(BTN_R3):
+            # Pose-save buttons are unassigned; saving is done via the GUI.
+            print(f"[BTN] {name} -> (unassigned)")
         elif _is(BTN_SHARE):
             print(f"[BTN] {name} -> Switch mode (Joint <-> Tool)")
             self.toggle_mode()
-        elif _is(BTN_HOME_GO):
+        elif _is(BTN_HOME_GO) or _is(BTN_SURGERY_GO):
+            # D-Pad left/right now jog axes - handled in _handle_axes
+            pass
+        elif _is(BTN_L2):
             print(f"[BTN] {name} -> Go to HOME pose")
-            self.go_to_position(self.home_joints, POS_HOME)
-        elif _is(BTN_SURGERY_GO):
+            threading.Thread(
+                target=lambda: self.go_to_position(self.home_joints, POS_HOME),
+                daemon=True,
+            ).start()
+        elif _is(BTN_R2):
             print(f"[BTN] {name} -> Go to SURGERY pose")
-            self.go_to_position(self.surgery_joints, POS_SURGERY)
-        elif _is(BTN_TRIANGLE):
-            print(f"[BTN] {name} -> Speed up (%{self.speed} -> %{min(self.speed+SPEED_STEP, SPEED_MAX)})")
-            self.set_speed(self.speed + SPEED_STEP)
-        elif _is(BTN_CROSS):
-            print(f"[BTN] {name} -> Speed down (%{self.speed} -> %{max(self.speed-SPEED_STEP, SPEED_MIN)})")
-            self.set_speed(self.speed - SPEED_STEP)
+            threading.Thread(
+                target=lambda: self.go_to_position(self.surgery_joints, POS_SURGERY),
+                daemon=True,
+            ).start()
+        elif _is(BTN_TRIANGLE) or _is(BTN_CROSS):
+            # Polled in _handle_axes: in TOOL mode they jog J4 (joint-space).
+            # In JOINT mode they are unassigned. No log here to avoid spam.
+            pass
         elif _is(BTN_CIRCLE):
             print(f"[BTN] {name} -> Drag mode")
             self.toggle_drag()
         elif _is(BTN_PS):
             print(f"[BTN] {name} -> (disabled)")
         elif _is(BTN_DPAD_UP) or _is(BTN_DPAD_DOWN):
-            # D-Pad Y is polled continuously inside _handle_axes; no extra log
+            # D-Pad Y is polled continuously inside _handle_axes - no extra log
             pass
         else:
             print(f"[BTN] B{button} -> (unassigned)")
 
-    def _handle_dpad(self, value):
-        """Handle D-Pad events: left/right -> go to pose."""
-        hat_x, hat_y = value
-        if hat_x == -1:
-            print("[D-PAD] Left -> Go to HOME pose")
-            self.go_to_position(self.home_joints, POS_HOME)
-        elif hat_x == 1:
-            print("[D-PAD] Right -> Go to SURGERY pose")
-            self.go_to_position(self.surgery_joints, POS_SURGERY)
+    def _handle_dpad(self, _value):
+        """D-Pad events are read continuously inside _handle_axes; nothing to do here."""
+        pass
 
     def _handle_axes(self, js):
         # Do not send jog commands while drag mode is active
@@ -835,6 +940,33 @@ class JoystickRobotController:
         elif BTN_DPAD_DOWN >= 0 and js.get_button(BTN_DPAD_DOWN):
             dpad_y = -1
 
+        # D-Pad X (left/right) - Linux uses hat[0], Windows uses buttons 13/14.
+        dpad_x = hat[0]
+        if BTN_HOME_GO >= 0 and js.get_button(BTN_HOME_GO):
+            dpad_x = -1
+        elif BTN_SURGERY_GO >= 0 and js.get_button(BTN_SURGERY_GO):
+            dpad_x = 1
+
+        # L2/R2 edge-triggered pose recall (Windows: axis-based)
+        l2_val = (l2 + 1) / 2
+        r2_val = (r2 + 1) / 2
+        l2_pressed = l2_val > 0.5
+        r2_pressed = r2_val > 0.5
+        if l2_pressed and not self._l2_prev_pressed:
+            print("[L2] -> Go to HOME pose")
+            threading.Thread(
+                target=lambda: self.go_to_position(self.home_joints, POS_HOME),
+                daemon=True,
+            ).start()
+        if r2_pressed and not self._r2_prev_pressed:
+            print("[R2] -> Go to SURGERY pose")
+            threading.Thread(
+                target=lambda: self.go_to_position(self.surgery_joints, POS_SURGERY),
+                daemon=True,
+            ).start()
+        self._l2_prev_pressed = l2_pressed
+        self._r2_prev_pressed = r2_pressed
+
         candidates = []
 
         if self.mode == MODE_JOINT:
@@ -848,44 +980,45 @@ class JoystickRobotController:
             if abs(rx) > DEADZONE:
                 candidates.append(("J4", abs(rx), "J4+" if rx > 0 else "J4-"))
 
-            l2_val = (l2 + 1) / 2
-            r2_val = (r2 + 1) / 2
-            if l2_val > 0.3:
-                candidates.append(("J5+", l2_val, "J5+"))
-            if r2_val > 0.3:
-                candidates.append(("J5-", r2_val, "J5-"))
+            # D-Pad left/right -> J5 (replaces the previous L2/R2 role)
+            if dpad_x != 0:
+                candidates.append(("J5", 1.0, "J5+" if dpad_x < 0 else "J5-"))
 
-            # D-Pad up/down -> J6 (left/right reserved for pose recall)
+            # D-Pad up/down -> J6
             if dpad_y != 0:
                 candidates.append(("J6", 1.0, "J6+" if dpad_y > 0 else "J6-"))
 
         else:
             # --- TOOL MODE ---
-            # Left stick: X/Y translation along tool axes
-            if abs(ly) > DEADZONE:
-                candidates.append(("X", abs(ly), "X-" if ly > 0 else "X+"))
+            # Left stick X: X axis (right -> X+, left -> X-)
             if abs(lx) > DEADZONE:
-                candidates.append(("Y", abs(lx), "Y+" if lx > 0 else "Y-"))
+                candidates.append(("X", abs(lx), "X+" if lx > 0 else "X-"))
+            # Left stick Y: Y axis (up -> Y+, down -> Y-)
+            if abs(ly) > DEADZONE:
+                candidates.append(("Y", abs(ly), "Y-" if ly > 0 else "Y+"))
 
-            # Right stick Y: Z translation up/down
+            # Right stick Y: Z axis (up -> Z-, down -> Z+)
             if abs(ry) > DEADZONE:
-                candidates.append(("Z", abs(ry), "Z-" if ry > 0 else "Z+"))
+                candidates.append(("Z", abs(ry), "Z+" if ry > 0 else "Z-"))
 
-            # Right stick X: Ry rotation = head turn (TCP stays fixed)
+            # Right stick X: Ry rotation (right -> Ry+, left -> Ry-)
             if abs(rx) > DEADZONE:
                 candidates.append(("Ry", abs(rx), "Ry+" if rx > 0 else "Ry-"))
 
-            # L2/R2: Rx rotation = head up/down (TCP stays fixed)
-            l2_val = (l2 + 1) / 2
-            r2_val = (r2 + 1) / 2
-            if l2_val > 0.3:
-                candidates.append(("Rx-", l2_val, "Rx-"))
-            if r2_val > 0.3:
-                candidates.append(("Rx+", r2_val, "Rx+"))
-
-            # D-Pad Y: Rz rotation = head tilt
+            # D-Pad ^v: Rx rotation (up -> Rx-, down -> Rx+)
             if dpad_y != 0:
-                candidates.append(("Rz", 1.0, "Rz+" if dpad_y > 0 else "Rz-"))
+                candidates.append(("Rx", 1.0, "Rx-" if dpad_y > 0 else "Rx+"))
+
+            # D-Pad <>: Rz rotation (left -> Rz+, right -> Rz-)
+            if dpad_x != 0:
+                candidates.append(("Rz", 1.0, "Rz+" if dpad_x < 0 else "Rz-"))
+
+            # Triangle / Cross while in TOOL mode -> J4 jog (joint-space).
+            # Lets the operator nudge the wrist without leaving tool mode.
+            if BTN_TRIANGLE >= 0 and js.get_button(BTN_TRIANGLE):
+                candidates.append(("J4", 1.0, "J4+"))
+            elif BTN_CROSS >= 0 and js.get_button(BTN_CROSS):
+                candidates.append(("J4", 1.0, "J4-"))
 
         if candidates:
             candidates.sort(key=lambda c: c[1], reverse=True)
