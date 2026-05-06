@@ -827,15 +827,19 @@ class RobotGUI(QMainWindow):
             self.lbl_errors.setStyleSheet("color: #a6e3a1; font-weight: bold;")
 
     def _set_start_btn_state(self, state):
-        """Set the start button state: 'ready', 'running', 'no_joystick', 'no_robot'."""
+        """Set the start button state: 'ready', 'running', 'stopping', 'no_joystick', 'no_robot'."""
         # Small FSM for the bottom-bar start button. Driven via the log-bridge
         # "__STATE__:" protocol so the worker thread can update it safely.
+        # 'running' stays clickable so the same button toggles stop.
         styles = {
             "ready": ("JOYSTICK KONTROLÜNÜ BAŞLAT", True,
                 "QPushButton { background-color: #40a02b; color: white; font-size: 15px; padding: 10px; }"
                 "QPushButton:hover { background-color: #50c030; }"),
-            "running": ("KONTROL AKTİF", False,
-                "QPushButton { background-color: #1e66f5; color: white; font-size: 15px; padding: 10px; }"),
+            "running": ("KONTROLÜ DURDUR", True,
+                "QPushButton { background-color: #d20f39; color: white; font-size: 15px; padding: 10px; }"
+                "QPushButton:hover { background-color: #ff1144; }"),
+            "stopping": ("DURDURULUYOR...", False,
+                "QPushButton { background-color: #6c7086; color: white; font-size: 15px; padding: 10px; }"),
             "no_joystick": ("JOYSTICK BULUNAMADI — TEKRAR DENE", True,
                 "QPushButton { background-color: #d20f39; color: white; font-size: 15px; padding: 10px; }"
                 "QPushButton:hover { background-color: #ff1144; }"),
@@ -849,9 +853,14 @@ class RobotGUI(QMainWindow):
         self.btn_start.setStyleSheet(style)
 
     def _start_worker(self):
-        # Guard against double-start before flipping the button state and
-        # spawning the joystick loop on a daemon thread.
+        # Toggle behaviour: if the worker is already running this acts as a
+        # stop request. The loop notices worker_running=False, exits cleanly,
+        # and emits __STATE__:ready in its finally block to flip the button
+        # back to its "BAŞLAT" appearance.
         if self.worker_running:
+            self._set_start_btn_state("stopping")
+            self.worker_running = False
+            self.controller.running = False
             return
         self._set_start_btn_state("running")
         self.worker_running = True
