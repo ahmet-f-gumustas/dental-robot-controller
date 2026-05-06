@@ -8,7 +8,6 @@ Graphical frontend on top of joystick_control.py.
 
 import sys
 import os
-import re
 import time
 import threading
 
@@ -24,17 +23,16 @@ sys.path.insert(0, os.path.join(_BASE_DIR, "TCP-IP-Python-V4"))
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QGroupBox, QGridLayout,
-    QSlider, QProgressBar, QFrame, QDialog, QScrollArea, QSizePolicy
+    QSlider, QProgressBar, QFrame, QDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QColor, QPalette
 
 import pygame
-from dobot_api import DobotApiDashboard
 
 from joystick_control import (
     JoystickRobotController, ROBOT_IP,
-    MODE_JOINT, MODE_TOOL, MODE_LABELS_TR,
+    MODE_TOOL, MODE_LABELS_TR,
     POS_HOME, POS_SURGERY,
     SPEED_MIN, SPEED_MAX,
     LOOP_HZ,
@@ -528,6 +526,13 @@ class RobotGUI(QMainWindow):
             lambda: self.controller.go_to_position(self.controller.home_joints, POS_HOME)
         ))
 
+        self.btn_save_home = QPushButton("HOME\nPOZ. KAYDET")
+        self.btn_save_home.setStyleSheet("""
+            QPushButton { background-color: #04a5e5; color: white; font-size: 11px; padding: 8px; }
+            QPushButton:hover { background-color: #22bbff; }
+        """)
+        self.btn_save_home.clicked.connect(lambda: self._run_async(self.controller.save_home))
+
         self.btn_surgery = QPushButton("AMELİYATA GİT")
         self.btn_surgery.setStyleSheet("""
             QPushButton { background-color: #e64553; color: white; font-size: 14px; padding: 10px; }
@@ -536,6 +541,13 @@ class RobotGUI(QMainWindow):
         self.btn_surgery.clicked.connect(lambda: self._run_async(
             lambda: self.controller.go_to_position(self.controller.surgery_joints, POS_SURGERY)
         ))
+
+        self.btn_save_surgery = QPushButton("AMELİYAT\nPOZ. KAYDET")
+        self.btn_save_surgery.setStyleSheet("""
+            QPushButton { background-color: #df8e1d; color: white; font-size: 11px; padding: 8px; }
+            QPushButton:hover { background-color: #ffaa22; }
+        """)
+        self.btn_save_surgery.clicked.connect(lambda: self._run_async(self.controller.save_surgery))
 
         self.btn_enable = QPushButton("ROBOTU\nETKİNLEŞTİR")
         self.btn_enable.setStyleSheet("""
@@ -569,7 +581,9 @@ class RobotGUI(QMainWindow):
         self.btn_clear_alarm.clicked.connect(lambda: self._run_async(self.controller.clear_error))
 
         pos_layout.addWidget(self.btn_home)
+        pos_layout.addWidget(self.btn_save_home)
         pos_layout.addWidget(self.btn_surgery)
+        pos_layout.addWidget(self.btn_save_surgery)
         pos_layout.addWidget(self.btn_enable)
         pos_layout.addWidget(self.btn_stop)
         pos_layout.addWidget(self.btn_emergency)

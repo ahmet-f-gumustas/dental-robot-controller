@@ -27,8 +27,6 @@ Control map:
     R1             -> Enable + prepare robot
     L2             -> Go to HOME pose
     R2             -> Go to SURGERY pose
-    L3             -> (unassigned)
-    R3             -> (unassigned)
     Options        -> Clear alarm (preserve tool/speed settings)
     PS (Home)      -> (unassigned)
 """
@@ -140,8 +138,6 @@ if _platform.system() == "Windows":
     BTN_SHARE      = 4    # Switch mode (matches Linux SHARE: toggle_mode)
     BTN_PS         = 5    # Unassigned (per user request)
     BTN_OPTIONS    = 6    # Clear alarm (clear_error)
-    BTN_L3         = 7    # Save Home pose (Linux L3)
-    BTN_R3         = 8    # Save Surgery pose (Linux R3)
     BTN_L1         = 9    # Disable robot (Linux L1)
     BTN_R1         = 10   # Enable robot (Linux R1)
     BTN_DPAD_UP    = 11   # D-Pad up   -> J6+ (joint) / Rx- (tool)
@@ -165,8 +161,6 @@ else:
     BTN_SHARE      = 8
     BTN_OPTIONS    = 9
     BTN_PS         = 10
-    BTN_L3         = 11
-    BTN_R3         = 12
     BTN_HOME_GO    = -1  # Linux uses D-Pad (hat) events
     BTN_SURGERY_GO = -1
     BTN_DPAD_UP    = -1  # Linux uses hat[1]
@@ -800,7 +794,6 @@ class JoystickRobotController:
         print("  ---  POSITION  ---")
         print("  L2           : Go to HOME pose")
         print("  R2           : Go to SURGERY pose")
-        print("  L3 / R3      : (unassigned)")
         print("  ---  JOINT MODE  ---")
         print("  Left stick   : J1 / J2")
         print("  Right stick  : J3 / J4")
@@ -856,7 +849,7 @@ class JoystickRobotController:
             (BTN_L1, "L1"), (BTN_R1, "R1"),
             (BTN_L2, "L2"), (BTN_R2, "R2"),
             (BTN_SHARE, "SHARE"), (BTN_OPTIONS, "OPTIONS"),
-            (BTN_L3, "L3"), (BTN_R3, "R3"), (BTN_PS, "PS"),
+            (BTN_PS, "PS"),
             (BTN_HOME_GO, "HOME_GO"), (BTN_SURGERY_GO, "SURGERY_GO"),
         ):
             if _btn >= 0 and _btn not in _BTN_NAMES:
@@ -879,9 +872,6 @@ class JoystickRobotController:
         elif _is(BTN_OPTIONS):
             print(f"[BTN] {name} -> Clear alarm (ClearError)")
             self.clear_error()
-        elif _is(BTN_L3) or _is(BTN_R3):
-            # Pose-save buttons are unassigned; saving is done via the GUI.
-            print(f"[BTN] {name} -> (unassigned)")
         elif _is(BTN_SHARE):
             print(f"[BTN] {name} -> Switch mode (Joint <-> Tool)")
             self.toggle_mode()
